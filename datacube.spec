@@ -12,6 +12,7 @@ Source0:        %{url}/archive/main/%{crate}-main.tar.gz
 BuildRequires:  rust >= 1.70
 BuildRequires:  cargo
 BuildRequires:  protobuf-compiler
+BuildRequires:  systemd-rpm-macros
 
 %description
 Datacube is a background service that provides data to application launchers
