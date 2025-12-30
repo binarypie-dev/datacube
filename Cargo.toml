@@ -1,0 +1,76 @@
+[package]
+name = "datacube"
+version = "0.1.0"
+edition = "2021"
+authors = ["Hypercube Project"]
+description = "Data provider service for application launchers and desktop utilities"
+license = "Apache-2.0"
+repository = "https://github.com/hypercube/datacube"
+keywords = ["launcher", "desktop", "wayland", "hyprland"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "net", "sync", "io-util", "macros", "rt-multi-thread"] }
+
+# Protocol buffers
+prost = "0.13"
+
+# Desktop entry parsing
+freedesktop-desktop-entry = "0.7"
+freedesktop-icons = "0.2"
+
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"
+
+# Fuzzy matching
+fuzzy-matcher = "0.3"
+nucleo-matcher = "0.3"
+
+# Math evaluation
+meval = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Directory paths
+directories = "5"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+once_cell = "1"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+dirs = "5"
+async-trait = "0.1"
+futures = "0.3"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "datacube"
+path = "src/main.rs"
+
+[[bin]]
+name = "datacube-cli"
+path = "src/bin/datacube-cli.rs"
