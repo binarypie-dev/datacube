@@ -6,8 +6,8 @@ Release:        1%{?dist}
 Summary:        Data provider service for application launchers and desktop utilities
 
 License:        Apache-2.0
-URL:            https://github.com/hypercube/datacube
-Source0:        %{url}/archive/v%{version}/%{crate}-%{version}.tar.gz
+URL:            https://github.com/binarypie-dev/datacube
+Source0:        %{url}/archive/main/%{crate}-main.tar.gz
 
 BuildRequires:  rust >= 1.70
 BuildRequires:  cargo
@@ -19,7 +19,7 @@ and desktop utilities. It indexes desktop applications, provides calculator
 functionality, and command execution capabilities via a Unix socket interface.
 
 %prep
-%autosetup -n %{crate}-%{version}
+%autosetup -n %{crate}-main
 
 %build
 cargo build --release --locked
