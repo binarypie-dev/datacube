@@ -260,17 +260,32 @@ impl ApplicationsProvider {
             exec, is_terminal
         );
 
+        use std::process::Stdio;
+
+        // Launch detached from datacube so apps survive if datacube exits
+        // Use setsid to create a new session, preventing SIGHUP propagation
         if is_terminal {
-            // Launch in terminal
-            std::process::Command::new("foot")
+            std::process::Command::new("setsid")
+                .arg("-f")
+                .arg("foot")
                 .arg("-e")
                 .arg("sh")
                 .arg("-c")
                 .arg(exec)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .spawn()?;
         } else {
-            // Launch directly using sh -c to handle complex exec strings
-            std::process::Command::new("sh").arg("-c").arg(exec).spawn()?;
+            std::process::Command::new("setsid")
+                .arg("-f")
+                .arg("sh")
+                .arg("-c")
+                .arg(exec)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
         }
 
         // TODO: Increment launch count for this app

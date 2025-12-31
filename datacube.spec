@@ -1,7 +1,7 @@
 %global crate datacube
 
 Name:           %{crate}
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Data provider service for application launchers and desktop utilities
 
@@ -48,7 +48,3 @@ install -Dm644 datacube.service %{buildroot}%{_userunitdir}/datacube.service
 %{_bindir}/datacube
 %{_bindir}/datacube-cli
 %{_userunitdir}/datacube.service
-
-%changelog
-* Sun Dec 29 2024 Hypercube Project - 0.1.0-1
-- Initial package release
