@@ -1,6 +1,6 @@
 [Unit]
 Description=Datacube - Data provider service for application launchers
-Documentation=https://github.com/hypercube/datacube
+Documentation=https://github.com/binarypie-dev/datacube
 After=graphical-session.target
 
 [Service]
@@ -8,17 +8,7 @@ Type=simple
 ExecStart=/usr/bin/datacube
 Restart=on-failure
 RestartSec=5
-
-# Environment
 Environment=RUST_LOG=info
-
-# Sandboxing
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-ReadOnlyPaths=/usr
-ReadWritePaths=%t/datacube
 
 [Install]
 WantedBy=default.target
