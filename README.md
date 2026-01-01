@@ -4,18 +4,19 @@ A data provider service for application launchers and desktop utilities in the H
 
 ## Overview
 
-Datacube is a background service that indexes and provides data to application launchers via a Unix socket interface. It supports:
+Datacube is a background service that provides data to application launchers via a Unix socket interface. It is a **data broker** - it provides information but does not execute commands or launch applications. That responsibility belongs to the client application.
 
-- **Application search** - Indexes desktop applications from XDG directories, including flatpak apps (searchable by ID like `org.mozilla.firefox`)
+Supported providers:
+
+- **Applications** - Indexes desktop applications from XDG directories, including flatpak apps (searchable by ID like `org.mozilla.firefox`)
 - **Calculator** - Evaluate math expressions with the `=` prefix (e.g., `=2+2`)
-- **Command execution** - Run shell commands with the `/` prefix (e.g., `/htop`)
 
 ## Installation
 
 ### From COPR (Fedora)
 
 ```bash
-sudo dnf copr enable hypercube/datacube
+sudo dnf copr enable binarypie/hypercube
 sudo dnf install datacube
 ```
 
@@ -38,6 +39,9 @@ systemctl --user enable --now datacube.service
 
 # Check status
 systemctl --user status datacube.service
+
+# View logs
+journalctl --user -u datacube.service -f
 ```
 
 ### Using the CLI
@@ -52,13 +56,16 @@ datacube-cli query org.mozilla
 # Calculator
 datacube-cli query "=2+2"
 
-# Run a command
-datacube-cli query "/htop"
+# JSON output (for scripting)
+datacube-cli query firefox --json
+
+# List providers
+datacube-cli providers
 ```
 
 ## Architecture
 
-Datacube communicates via Protocol Buffers over a Unix socket at `$XDG_RUNTIME_DIR/datacube/datacube.sock`.
+Datacube communicates via Protocol Buffers over a Unix socket at `$XDG_RUNTIME_DIR/datacube.sock`.
 
 ### Providers
 
@@ -66,7 +73,37 @@ Datacube communicates via Protocol Buffers over a Unix socket at `$XDG_RUNTIME_D
 |----------|--------|-------------|
 | applications | (none) | Desktop applications from XDG data dirs |
 | calculator | `=` | Math expression evaluation |
-| command | `/` | Shell command execution |
+
+### Protocol
+
+The protocol uses a simple framing format:
+- 1 byte message type
+- 4 bytes big-endian length
+- N bytes protobuf-encoded body
+
+Message types:
+- `1` Query request
+- `2` Query response
+- `5` List providers request
+- `6` List providers response
+
+## Configuration
+
+Configuration file: `~/.config/datacube/config.toml`
+
+```toml
+# Socket path (default: $XDG_RUNTIME_DIR/datacube.sock)
+socket_path = "/run/user/1000/datacube.sock"
+
+# Maximum results per query
+max_results = 50
+
+[providers.applications]
+enabled = true
+
+[providers.calculator]
+enabled = true
+```
 
 ## License
 

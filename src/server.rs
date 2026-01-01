@@ -3,10 +3,7 @@
 //! Handles client connections and dispatches requests to providers.
 
 use crate::config::Config;
-use crate::proto::{
-    ActivateRequest, ActivateResponse, ListProvidersResponse, QueryRequest,
-    QueryResponse,
-};
+use crate::proto::{ListProvidersResponse, QueryRequest, QueryResponse};
 use crate::providers::ProviderManager;
 use prost::Message;
 use std::sync::Arc;
@@ -20,8 +17,6 @@ use tracing::{debug, error, info, warn};
 enum MessageType {
     Query = 1,
     QueryResponse = 2,
-    Activate = 3,
-    ActivateResponse = 4,
     ListProviders = 5,
     ListProvidersResponse = 6,
 }
@@ -33,8 +28,6 @@ impl TryFrom<u8> for MessageType {
         match value {
             1 => Ok(MessageType::Query),
             2 => Ok(MessageType::QueryResponse),
-            3 => Ok(MessageType::Activate),
-            4 => Ok(MessageType::ActivateResponse),
             5 => Ok(MessageType::ListProviders),
             6 => Ok(MessageType::ListProvidersResponse),
             _ => Err(()),
@@ -126,9 +119,6 @@ async fn handle_connection(
             Ok(MessageType::Query) => {
                 handle_query(&body, &manager, max_results).await
             }
-            Ok(MessageType::Activate) => {
-                handle_activate(&body, &manager).await
-            }
             Ok(MessageType::ListProviders) => {
                 handle_list_providers(&body, &manager).await
             }
@@ -186,72 +176,6 @@ async fn handle_query(
     };
 
     Some((MessageType::QueryResponse, response.encode_to_vec()))
-}
-
-/// Handle an activate request
-async fn handle_activate(body: &[u8], manager: &ProviderManager) -> Option<(MessageType, Vec<u8>)> {
-    let request = match ActivateRequest::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to decode ActivateRequest: {}", e);
-            return None;
-        }
-    };
-
-    let Some(proto_item) = request.item else {
-        error!("ActivateRequest missing item");
-        return Some((
-            MessageType::ActivateResponse,
-            ActivateResponse {
-                success: false,
-                error: "Missing item".to_string(),
-            }
-            .encode_to_vec(),
-        ));
-    };
-
-    // Convert proto Item to our Item
-    let item = crate::providers::Item {
-        id: proto_item.id,
-        text: proto_item.text,
-        subtext: proto_item.subtext,
-        icon: proto_item.icon,
-        provider: proto_item.provider,
-        score: proto_item.score,
-        exec: proto_item.exec,
-        metadata: proto_item.metadata,
-        actions: proto_item
-            .actions
-            .into_iter()
-            .map(|a| crate::providers::Action {
-                id: a.id,
-                name: a.name,
-                icon: a.icon,
-            })
-            .collect(),
-    };
-
-    debug!("Activate: {} from {}", item.text, item.provider);
-
-    let action_id = if request.action_id.is_empty() {
-        None
-    } else {
-        Some(request.action_id.as_str())
-    };
-    let result = manager.activate(&item, action_id).await;
-
-    let response = match result {
-        Ok(()) => ActivateResponse {
-            success: true,
-            error: String::new(),
-        },
-        Err(e) => ActivateResponse {
-            success: false,
-            error: e.to_string(),
-        },
-    };
-
-    Some((MessageType::ActivateResponse, response.encode_to_vec()))
 }
 
 /// Handle a list providers request

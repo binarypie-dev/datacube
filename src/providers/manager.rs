@@ -78,18 +78,6 @@ impl ProviderManager {
         items
     }
 
-    /// Activate an item
-    pub async fn activate(&self, item: &Item, _action_id: Option<&str>) -> anyhow::Result<()> {
-        let providers = self.providers.read().await;
-
-        // Find the provider that owns this item
-        let provider = providers
-            .iter()
-            .find(|p| p.name() == item.provider)
-            .ok_or_else(|| anyhow::anyhow!("Provider '{}' not found", item.provider))?;
-
-        provider.activate(item).await
-    }
 }
 
 impl Default for ProviderManager {

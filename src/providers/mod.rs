@@ -5,12 +5,10 @@
 
 pub mod applications;
 pub mod calculator;
-pub mod command;
 pub mod manager;
 
 pub use applications::ApplicationsProvider;
 pub use calculator::CalculatorProvider;
-pub use command::CommandProvider;
 pub use manager::ProviderManager;
 
 use std::collections::HashMap;
@@ -30,12 +28,8 @@ pub struct Item {
     pub provider: String,
     /// Relevance score (0.0 - 1.0)
     pub score: f32,
-    /// Execution command or action
-    pub exec: String,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
-    /// Available actions
-    pub actions: Vec<Action>,
 }
 
 impl Item {
@@ -49,9 +43,7 @@ impl Item {
             icon: String::new(),
             provider: provider.into(),
             score: 0.0,
-            exec: String::new(),
             metadata: HashMap::new(),
-            actions: Vec::new(),
         }
     }
 
@@ -70,18 +62,8 @@ impl Item {
         self
     }
 
-    pub fn with_exec(mut self, exec: impl Into<String>) -> Self {
-        self.exec = exec.into();
-        self
-    }
-
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
-        self
-    }
-
-    pub fn with_action(mut self, action: Action) -> Self {
-        self.actions.push(action);
         self
     }
 }
@@ -95,27 +77,7 @@ impl From<Item> for crate::proto::Item {
             icon: item.icon,
             provider: item.provider,
             score: item.score,
-            exec: item.exec,
             metadata: item.metadata,
-            actions: item.actions.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-/// An action that can be performed on an item
-#[derive(Debug, Clone)]
-pub struct Action {
-    pub id: String,
-    pub name: String,
-    pub icon: String,
-}
-
-impl From<Action> for crate::proto::Action {
-    fn from(action: Action) -> Self {
-        crate::proto::Action {
-            id: action.id,
-            name: action.name,
-            icon: action.icon,
         }
     }
 }
@@ -175,9 +137,6 @@ pub trait Provider: Send + Sync {
 
     /// Query the provider for matching items
     fn query(&self, query: &str, max_results: usize) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>>;
-
-    /// Activate an item (execute its action)
-    fn activate(&self, item: &Item) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
 
     /// Get provider info
     fn info(&self) -> ProviderInfo {

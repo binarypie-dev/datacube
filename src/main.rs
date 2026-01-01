@@ -4,9 +4,7 @@
 //! application launchers and desktop utilities.
 
 use clap::Parser;
-use datacube::{
-    ApplicationsProvider, CalculatorProvider, CommandProvider, Config, ProviderManager, Server,
-};
+use datacube::{ApplicationsProvider, CalculatorProvider, Config, ProviderManager, Server};
 use std::path::PathBuf;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -75,9 +73,6 @@ async fn main() -> anyhow::Result<()> {
         manager.register(CalculatorProvider::new()).await;
     }
 
-    if config.providers.command.enabled {
-        manager.register(CommandProvider::new()).await;
-    }
 
     info!("Registered {} providers", manager.list_providers().await.len());
 

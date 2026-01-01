@@ -30,10 +30,6 @@ pub struct ProvidersConfig {
     /// Calculator provider config
     #[serde(default)]
     pub calculator: CalculatorConfig,
-
-    /// Command provider config
-    #[serde(default)]
-    pub command: CommandConfig,
 }
 
 /// Applications provider configuration
@@ -83,27 +79,6 @@ impl Default for CalculatorConfig {
     }
 }
 
-/// Command provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandConfig {
-    /// Whether this provider is enabled
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Prefix to trigger command runner (default: "/")
-    #[serde(default = "default_cmd_prefix")]
-    pub prefix: String,
-}
-
-impl Default for CommandConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            prefix: default_cmd_prefix(),
-        }
-    }
-}
-
 // Default value functions for serde
 fn default_socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
@@ -125,10 +100,6 @@ fn default_terminal() -> String {
 
 fn default_calc_prefix() -> String {
     "=".to_string()
-}
-
-fn default_cmd_prefix() -> String {
-    "/".to_string()
 }
 
 impl Default for Config {

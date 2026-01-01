@@ -1,6 +1,6 @@
 //! Applications provider - searches installed desktop applications
 
-use super::{Action, Item, Provider};
+use super::{Item, Provider};
 use freedesktop_desktop_entry::{DesktopEntry, Iter};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -8,7 +8,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// A cached application entry
 #[derive(Debug, Clone)]
@@ -21,8 +21,6 @@ struct AppEntry {
     generic_name: Option<String>,
     /// Description/comment
     comment: Option<String>,
-    /// Exec command
-    exec: String,
     /// Icon name
     icon: String,
     /// Keywords for searching
@@ -76,10 +74,10 @@ impl ApplicationsProvider {
                         None => continue,
                     };
 
-                    let exec = match entry.exec() {
-                        Some(e) => e.to_string(),
-                        None => continue,
-                    };
+                    // Skip entries without an exec command (not launchable)
+                    if entry.exec().is_none() {
+                        continue;
+                    }
 
                     // Get the desktop file ID (filename without extension)
                     let id = path
@@ -93,7 +91,6 @@ impl ApplicationsProvider {
                         name,
                         generic_name: entry.generic_name(locales).map(|s| s.to_string()),
                         comment: entry.comment(locales).map(|s| s.to_string()),
-                        exec,
                         icon: entry.icon().unwrap_or("application-x-executable").to_string(),
                         keywords: entry
                             .keywords(locales)
@@ -157,23 +154,6 @@ impl ApplicationsProvider {
         None
     }
 
-    /// Clean the exec string by removing field codes (%f, %F, %u, %U, etc.)
-    fn clean_exec(exec: &str) -> String {
-        let mut result = String::new();
-        let mut chars = exec.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                // Skip the field code character
-                chars.next();
-            } else {
-                result.push(c);
-            }
-        }
-
-        result.trim().to_string()
-    }
-
     fn query_impl(&self, query: &str, max_results: usize) -> Vec<Item> {
         let apps = match self.apps.read() {
             Ok(guard) => guard,
@@ -195,7 +175,6 @@ impl ApplicationsProvider {
                         )
                         .with_icon(&app.icon)
                         .with_score(app.launch_count as f32 / 100.0)
-                        .with_exec(Self::clean_exec(&app.exec))
                         .with_metadata("desktop_id", &app.id)
                         .with_metadata("terminal", if app.terminal { "true" } else { "false" })
                 })
@@ -235,62 +214,10 @@ impl ApplicationsProvider {
                     )
                     .with_icon(&app.icon)
                     .with_score(normalized_score)
-                    .with_exec(Self::clean_exec(&app.exec))
                     .with_metadata("desktop_id", &app.id)
                     .with_metadata("terminal", if app.terminal { "true" } else { "false" })
-                    .with_action(Action {
-                        id: "launch".to_string(),
-                        name: "Launch".to_string(),
-                        icon: "system-run".to_string(),
-                    })
             })
             .collect()
-    }
-
-    fn activate_impl(&self, item: &Item) -> anyhow::Result<()> {
-        let exec = &item.exec;
-        let is_terminal = item
-            .metadata
-            .get("terminal")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        debug!(
-            "Activating application: {} (terminal: {})",
-            exec, is_terminal
-        );
-
-        use std::process::Stdio;
-
-        // Launch detached from datacube so apps survive if datacube exits
-        // Use setsid to create a new session, preventing SIGHUP propagation
-        if is_terminal {
-            std::process::Command::new("setsid")
-                .arg("-f")
-                .arg("foot")
-                .arg("-e")
-                .arg("sh")
-                .arg("-c")
-                .arg(exec)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-        } else {
-            std::process::Command::new("setsid")
-                .arg("-f")
-                .arg("sh")
-                .arg("-c")
-                .arg(exec)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-        }
-
-        // TODO: Increment launch count for this app
-
-        Ok(())
     }
 }
 
@@ -311,11 +238,6 @@ impl Provider for ApplicationsProvider {
 
     fn query(&self, query: &str, max_results: usize) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>> {
         let result = self.query_impl(query, max_results);
-        Box::pin(async move { result })
-    }
-
-    fn activate(&self, item: &Item) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
-        let result = self.activate_impl(item);
         Box::pin(async move { result })
     }
 }

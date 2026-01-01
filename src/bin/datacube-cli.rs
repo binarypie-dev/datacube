@@ -4,13 +4,9 @@
 //!   datacube-cli query "firefox"
 //!   datacube-cli query "=2+2"
 //!   datacube-cli providers
-//!   datacube-cli activate <item-json>
 
 use clap::{Parser, Subcommand};
-use datacube::proto::{
-    ActivateRequest, ActivateResponse, Item, ListProvidersRequest, ListProvidersResponse,
-    QueryRequest, QueryResponse,
-};
+use datacube::proto::{ListProvidersRequest, ListProvidersResponse, QueryRequest, QueryResponse};
 use prost::Message;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -50,17 +46,6 @@ enum Commands {
 
     /// List available providers
     Providers,
-
-    /// Activate an item (pipe JSON item to stdin)
-    Activate {
-        /// Action ID (optional)
-        #[arg(short, long)]
-        action: Option<String>,
-
-        /// Output result as JSON
-        #[arg(short, long)]
-        json: bool,
-    },
 }
 
 /// Message types for the protocol
@@ -68,10 +53,10 @@ enum Commands {
 #[derive(Debug, Clone, Copy)]
 enum MessageType {
     Query = 1,
+    #[allow(dead_code)]
     QueryResponse = 2,
-    Activate = 3,
-    ActivateResponse = 4,
     ListProviders = 5,
+    #[allow(dead_code)]
     ListProvidersResponse = 6,
 }
 
@@ -112,7 +97,12 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to connect to {:?}: {}", socket_path, e))?;
 
     match args.command {
-        Commands::Query { query, max, providers, json } => {
+        Commands::Query {
+            query,
+            max,
+            providers,
+            json,
+        } => {
             let providers_list: Vec<String> = providers
                 .map(|p| p.split(',').map(String::from).collect())
                 .unwrap_or_default();
@@ -139,13 +129,7 @@ fn main() -> anyhow::Result<()> {
                         "icon": item.icon,
                         "provider": item.provider,
                         "score": item.score,
-                        "exec": item.exec,
                         "metadata": item.metadata,
-                        "actions": item.actions.iter().map(|a| serde_json::json!({
-                            "id": a.id,
-                            "name": a.name,
-                            "icon": a.icon
-                        })).collect::<Vec<_>>()
                     });
                     println!("{}", json_item);
                 }
@@ -155,22 +139,13 @@ fn main() -> anyhow::Result<()> {
                 println!();
 
                 for (i, item) in response.items.iter().enumerate() {
-                    println!(
-                        "{}. {} [{}]",
-                        i + 1,
-                        item.text,
-                        item.provider
-                    );
+                    println!("{}. {} [{}]", i + 1, item.text, item.provider);
                     if !item.subtext.is_empty() {
                         println!("   {}", item.subtext);
                     }
                     println!("   Score: {:.2}, Icon: {}", item.score, item.icon);
-                    if !item.exec.is_empty() {
-                        println!("   Exec: {}", item.exec);
-                    }
-                    if !item.actions.is_empty() {
-                        let action_names: Vec<_> = item.actions.iter().map(|a| &a.name).collect();
-                        println!("   Actions: {:?}", action_names);
+                    if !item.metadata.is_empty() {
+                        println!("   Metadata: {:?}", item.metadata);
                     }
                     println!();
                 }
@@ -179,7 +154,11 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Providers => {
             let request = ListProvidersRequest {};
-            send_message(&mut stream, MessageType::ListProviders, &request.encode_to_vec())?;
+            send_message(
+                &mut stream,
+                MessageType::ListProviders,
+                &request.encode_to_vec(),
+            )?;
 
             let (_, body) = recv_message(&mut stream)?;
             let response = ListProvidersResponse::decode(body.as_slice())?;
@@ -189,60 +168,14 @@ fn main() -> anyhow::Result<()> {
                 println!(
                     "  - {} (prefix: '{}', enabled: {})",
                     provider.name,
-                    if provider.prefix.is_empty() { "none" } else { &provider.prefix },
+                    if provider.prefix.is_empty() {
+                        "none"
+                    } else {
+                        &provider.prefix
+                    },
                     provider.enabled
                 );
                 println!("    {}", provider.description);
-            }
-        }
-
-        Commands::Activate { action, json } => {
-            // Read JSON item from stdin
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
-
-            let item: serde_json::Value = serde_json::from_str(&input)?;
-
-            let proto_item = Item {
-                id: item["id"].as_str().unwrap_or("").to_string(),
-                text: item["text"].as_str().unwrap_or("").to_string(),
-                subtext: item["subtext"].as_str().unwrap_or("").to_string(),
-                icon: item["icon"].as_str().unwrap_or("").to_string(),
-                provider: item["provider"].as_str().unwrap_or("").to_string(),
-                score: item["score"].as_f64().unwrap_or(0.0) as f32,
-                exec: item["exec"].as_str().unwrap_or("").to_string(),
-                metadata: item["metadata"]
-                    .as_object()
-                    .map(|m| {
-                        m.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                actions: vec![],
-            };
-
-            let request = ActivateRequest {
-                item: Some(proto_item),
-                action_id: action.unwrap_or_default(),
-            };
-
-            send_message(&mut stream, MessageType::Activate, &request.encode_to_vec())?;
-
-            let (_, body) = recv_message(&mut stream)?;
-            let response = ActivateResponse::decode(body.as_slice())?;
-
-            if json {
-                let result = serde_json::json!({
-                    "success": response.success,
-                    "error": response.error
-                });
-                println!("{}", result);
-            } else if response.success {
-                println!("Activated successfully");
-            } else {
-                eprintln!("Activation failed: {}", response.error);
-                std::process::exit(1);
             }
         }
     }

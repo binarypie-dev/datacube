@@ -35,7 +35,6 @@ impl CalculatorProvider {
                     .with_subtext(format!("{} =", expr))
                     .with_icon("accessories-calculator")
                     .with_score(1.0)
-                    .with_exec(result_str.clone())
                     .with_metadata("expression", expr)
                     .with_metadata("result", &result_str)]
             }
@@ -47,17 +46,6 @@ impl CalculatorProvider {
                     .with_score(0.5)]
             }
         }
-    }
-
-    fn activate_impl(&self, item: &Item) -> anyhow::Result<()> {
-        // Copy result to clipboard
-        if let Some(result) = item.metadata.get("result") {
-            debug!("Copying result to clipboard: {}", result);
-
-            std::process::Command::new("wl-copy").arg(result).spawn()?;
-        }
-
-        Ok(())
     }
 }
 
@@ -86,14 +74,6 @@ impl Provider for CalculatorProvider {
         max_results: usize,
     ) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>> {
         let result = self.query_impl(query, max_results);
-        Box::pin(async move { result })
-    }
-
-    fn activate(
-        &self,
-        item: &Item,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
-        let result = self.activate_impl(item);
         Box::pin(async move { result })
     }
 }

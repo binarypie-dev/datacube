@@ -13,8 +13,5 @@ pub mod proto {
 }
 
 pub use config::Config;
-pub use providers::{
-    Action, ApplicationsProvider, CalculatorProvider, CommandProvider, Item, Provider,
-    ProviderManager,
-};
+pub use providers::{ApplicationsProvider, CalculatorProvider, Item, Provider, ProviderManager};
 pub use server::Server;

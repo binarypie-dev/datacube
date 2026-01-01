@@ -38,38 +38,8 @@ message Item {
   string provider = 5;
   // Relevance score (0.0 - 1.0)
   float score = 6;
-  // Execution command or action
-  string exec = 7;
   // Additional metadata
-  map<string, string> metadata = 8;
-  // Available actions for this item
-  repeated Action actions = 9;
-}
-
-// An action that can be performed on an item
-message Action {
-  // Action identifier
-  string id = 1;
-  // Display name
-  string name = 2;
-  // Icon for the action
-  string icon = 3;
-}
-
-// Activate request - execute an item's action
-message ActivateRequest {
-  // The item to activate
-  Item item = 1;
-  // Specific action ID (empty = default action)
-  string action_id = 2;
-}
-
-// Activate response
-message ActivateResponse {
-  // Whether activation was successful
-  bool success = 1;
-  // Error message if failed
-  string error = 2;
+  map<string, string> metadata = 7;
 }
 
 // List available providers
