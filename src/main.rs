@@ -66,7 +66,10 @@ async fn main() -> anyhow::Result<()> {
     let manager = ProviderManager::new();
 
     if config.providers.applications.enabled {
-        manager.register(ApplicationsProvider::new()).await;
+        let extra_dirs = config.providers.applications.extra_dirs.clone();
+        manager
+            .register(ApplicationsProvider::with_extra_dirs(extra_dirs))
+            .await;
     }
 
     if config.providers.calculator.enabled {
