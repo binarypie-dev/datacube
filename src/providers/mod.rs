@@ -22,8 +22,10 @@ pub struct Item {
     pub text: String,
     /// Secondary display text (e.g., description)
     pub subtext: String,
-    /// Icon name or path
+    /// Icon name (from .desktop file)
     pub icon: String,
+    /// Resolved icon file path (SVG preferred, then largest PNG)
+    pub icon_path: String,
     /// Provider that generated this item
     pub provider: String,
     /// Relevance score (0.0 - 1.0)
@@ -41,6 +43,7 @@ impl Item {
             text,
             subtext: String::new(),
             icon: String::new(),
+            icon_path: String::new(),
             provider: provider.into(),
             score: 0.0,
             metadata: HashMap::new(),
@@ -54,6 +57,11 @@ impl Item {
 
     pub fn with_icon(mut self, icon: impl Into<String>) -> Self {
         self.icon = icon.into();
+        self
+    }
+
+    pub fn with_icon_path(mut self, icon_path: impl Into<String>) -> Self {
+        self.icon_path = icon_path.into();
         self
     }
 
@@ -75,6 +83,7 @@ impl From<Item> for crate::proto::Item {
             text: item.text,
             subtext: item.subtext,
             icon: item.icon,
+            icon_path: item.icon_path,
             provider: item.provider,
             score: item.score,
             metadata: item.metadata,

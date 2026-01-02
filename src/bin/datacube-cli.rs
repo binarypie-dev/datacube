@@ -120,19 +120,20 @@ fn main() -> anyhow::Result<()> {
             let response = QueryResponse::decode(body.as_slice())?;
 
             if json {
-                // Output each item as a JSON object on its own line (NDJSON format)
-                for item in response.items.iter() {
-                    let json_item = serde_json::json!({
+                // Output as a valid JSON array
+                let items: Vec<_> = response.items.iter().map(|item| {
+                    serde_json::json!({
                         "id": item.id,
                         "text": item.text,
                         "subtext": item.subtext,
                         "icon": item.icon,
+                        "icon_path": item.icon_path,
                         "provider": item.provider,
                         "score": item.score,
                         "metadata": item.metadata,
-                    });
-                    println!("{}", json_item);
-                }
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string()));
             } else {
                 println!("Query: '{}' (qid: {})", response.query, response.qid);
                 println!("Results: {}", response.items.len());
@@ -144,6 +145,9 @@ fn main() -> anyhow::Result<()> {
                         println!("   {}", item.subtext);
                     }
                     println!("   Score: {:.2}, Icon: {}", item.score, item.icon);
+                    if !item.icon_path.is_empty() {
+                        println!("   Icon path: {}", item.icon_path);
+                    }
                     if !item.metadata.is_empty() {
                         println!("   Metadata: {:?}", item.metadata);
                     }

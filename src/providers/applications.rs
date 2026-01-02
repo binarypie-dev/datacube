@@ -5,6 +5,7 @@
 
 use super::{Item, Provider};
 use freedesktop_desktop_entry::{DesktopEntry, Iter};
+use freedesktop_icons::lookup;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use notify::{
@@ -19,6 +20,9 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+/// Standard icon sizes to search (largest first)
+const ICON_SIZES: &[u16] = &[512, 256, 128, 96, 64, 48, 32, 24, 22, 16];
+
 /// A cached application entry
 #[derive(Debug, Clone)]
 struct AppEntry {
@@ -30,8 +34,10 @@ struct AppEntry {
     generic_name: Option<String>,
     /// Description/comment
     comment: Option<String>,
-    /// Icon name
+    /// Icon name (from .desktop file)
     icon: String,
+    /// Resolved icon file path (SVG or largest PNG)
+    icon_path: Option<String>,
     /// Keywords for searching
     keywords: Vec<String>,
     /// Whether this is a terminal app
@@ -137,6 +143,57 @@ impl ApplicationsProvider {
         dirs.into_iter().collect()
     }
 
+    /// Resolve an icon name to a file path
+    /// Prefers SVG, then falls back to the largest available PNG
+    fn resolve_icon_path(icon: &str) -> Option<String> {
+        // If it's already an absolute path, use it directly
+        let icon_path = Path::new(icon);
+        if icon_path.is_absolute() {
+            if icon_path.exists() {
+                return Some(icon.to_string());
+            }
+            // Absolute path but doesn't exist - try theme lookup anyway
+        }
+
+        // Try to find SVG first (scalable)
+        if let Some(path) = lookup(icon).with_scale(1).with_theme("hicolor").find() {
+            if path.extension().map(|e| e == "svg").unwrap_or(false) {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+
+        // Try each size from largest to smallest to find the best PNG
+        for &size in ICON_SIZES {
+            if let Some(path) = lookup(icon).with_size(size).with_scale(1).with_theme("hicolor").find() {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+
+        // Try without specifying theme (uses system default)
+        for &size in ICON_SIZES {
+            if let Some(path) = lookup(icon).with_size(size).with_scale(1).find() {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+
+        // Check common fallback locations
+        let fallback_dirs = [
+            "/usr/share/pixmaps",
+            "/usr/share/icons",
+        ];
+
+        for dir in fallback_dirs {
+            for ext in ["svg", "png", "xpm"] {
+                let path = PathBuf::from(dir).join(format!("{}.{}", icon, ext));
+                if path.exists() {
+                    return Some(path.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        None
+    }
+
     /// Parse a single .desktop file into an AppEntry
     fn parse_desktop_file(path: &Path) -> Option<AppEntry> {
         let entry = match DesktopEntry::from_path::<&str>(path, None) {
@@ -170,12 +227,16 @@ impl ApplicationsProvider {
             .unwrap_or("")
             .to_string();
 
+        let icon = entry.icon().unwrap_or("application-x-executable").to_string();
+        let icon_path = Self::resolve_icon_path(&icon);
+
         Some(AppEntry {
             id,
             name,
             generic_name: entry.generic_name(locales).map(|s| s.to_string()),
             comment: entry.comment(locales).map(|s| s.to_string()),
-            icon: entry.icon().unwrap_or("application-x-executable").to_string(),
+            icon,
+            icon_path,
             keywords: entry
                 .keywords(locales)
                 .map(|k| k.into_iter().map(String::from).collect())
@@ -452,6 +513,7 @@ impl ApplicationsProvider {
                                 .unwrap_or(""),
                         )
                         .with_icon(&app.icon)
+                        .with_icon_path(app.icon_path.as_deref().unwrap_or(""))
                         .with_score(app.launch_count as f32 / 100.0)
                         .with_metadata("desktop_id", &app.id)
                         .with_metadata("terminal", if app.terminal { "true" } else { "false" })
@@ -491,6 +553,7 @@ impl ApplicationsProvider {
                             .unwrap_or(""),
                     )
                     .with_icon(&app.icon)
+                    .with_icon_path(app.icon_path.as_deref().unwrap_or(""))
                     .with_score(normalized_score)
                     .with_metadata("desktop_id", &app.id)
                     .with_metadata("terminal", if app.terminal { "true" } else { "false" })

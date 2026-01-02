@@ -32,7 +32,7 @@ message Item {
   string text = 2;
   // Secondary display text (e.g., description)
   string subtext = 3;
-  // Icon name or path
+  // Icon name (from .desktop file)
   string icon = 4;
   // Provider that generated this item
   string provider = 5;
@@ -40,6 +40,8 @@ message Item {
   float score = 6;
   // Additional metadata
   map<string, string> metadata = 7;
+  // Resolved icon file path (SVG preferred, then largest PNG)
+  string icon_path = 8;
 }
 
 // List available providers
