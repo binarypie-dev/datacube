@@ -1,17 +1,22 @@
 //! Applications provider - searches installed desktop applications
+//!
+//! Uses incremental updates for efficient file watching - only the changed
+//! .desktop file is parsed/removed rather than reloading all applications.
 
 use super::{Item, Provider};
 use freedesktop_desktop_entry::{DesktopEntry, Iter};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
-use std::collections::HashSet;
+use notify::{
+    event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
+    EventKind, RecommendedWatcher, Watcher,
+};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 /// A cached application entry
@@ -31,17 +36,14 @@ struct AppEntry {
     keywords: Vec<String>,
     /// Whether this is a terminal app
     terminal: bool,
-    /// Path to the .desktop file
-    #[allow(dead_code)]
-    path: PathBuf,
     /// Launch count for ranking
     launch_count: u32,
 }
 
 /// Provider for installed applications
 pub struct ApplicationsProvider {
-    /// Cached application entries
-    apps: Arc<RwLock<Vec<AppEntry>>>,
+    /// Cached application entries, keyed by path for O(1) lookup
+    apps: Arc<RwLock<HashMap<PathBuf, AppEntry>>>,
     /// Fuzzy matcher
     matcher: SkimMatcherV2,
     /// Extra directories to scan (from config)
@@ -49,7 +51,7 @@ pub struct ApplicationsProvider {
     extra_dirs: Vec<PathBuf>,
     /// Keep watcher alive - dropping it stops watching
     #[allow(dead_code)]
-    watcher: Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>,
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl ApplicationsProvider {
@@ -58,7 +60,7 @@ impl ApplicationsProvider {
     }
 
     pub fn with_extra_dirs(extra_dirs: Vec<PathBuf>) -> Self {
-        let apps = Arc::new(RwLock::new(Vec::new()));
+        let apps = Arc::new(RwLock::new(HashMap::new()));
 
         // Load applications initially
         Self::load_applications_into(&apps, &extra_dirs);
@@ -135,11 +137,97 @@ impl ApplicationsProvider {
         dirs.into_iter().collect()
     }
 
-    /// Start watching application directories for changes
+    /// Parse a single .desktop file into an AppEntry
+    fn parse_desktop_file(path: &Path) -> Option<AppEntry> {
+        let entry = match DesktopEntry::from_path::<&str>(path, None) {
+            Ok(e) => e,
+            Err(e) => {
+                debug!("Failed to read desktop entry {:?}: {}", path, e);
+                return None;
+            }
+        };
+
+        // Skip entries marked as hidden or no-display
+        if entry.no_display() {
+            return None;
+        }
+
+        // Empty slice for default locale
+        let locales: &[&str] = &[];
+
+        // Skip entries without a name
+        let name = entry.name(locales)?.to_string();
+
+        // Skip entries without an exec command (not launchable)
+        if entry.exec().is_none() {
+            return None;
+        }
+
+        // Get the desktop file ID (filename without extension)
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        Some(AppEntry {
+            id,
+            name,
+            generic_name: entry.generic_name(locales).map(|s| s.to_string()),
+            comment: entry.comment(locales).map(|s| s.to_string()),
+            icon: entry.icon().unwrap_or("application-x-executable").to_string(),
+            keywords: entry
+                .keywords(locales)
+                .map(|k| k.into_iter().map(String::from).collect())
+                .unwrap_or_default(),
+            terminal: entry.terminal(),
+            launch_count: 0,
+        })
+    }
+
+    /// Add a single desktop entry to the cache
+    fn add_entry(apps: &Arc<RwLock<HashMap<PathBuf, AppEntry>>>, path: &Path) {
+        if let Some(entry) = Self::parse_desktop_file(path) {
+            debug!("Adding application: {} from {:?}", entry.name, path);
+            if let Ok(mut guard) = apps.write() {
+                guard.insert(path.to_path_buf(), entry);
+            }
+        }
+    }
+
+    /// Remove a single entry from the cache by path
+    fn remove_entry(apps: &Arc<RwLock<HashMap<PathBuf, AppEntry>>>, path: &Path) {
+        if let Ok(mut guard) = apps.write() {
+            if let Some(entry) = guard.remove(path) {
+                debug!("Removed application: {} from {:?}", entry.name, path);
+            }
+        }
+    }
+
+    /// Update an existing entry (remove + add)
+    fn update_entry(apps: &Arc<RwLock<HashMap<PathBuf, AppEntry>>>, path: &Path) {
+        // For updates, we just re-parse and insert (HashMap will replace)
+        if let Some(entry) = Self::parse_desktop_file(path) {
+            debug!("Updated application: {} from {:?}", entry.name, path);
+            if let Ok(mut guard) = apps.write() {
+                guard.insert(path.to_path_buf(), entry);
+            }
+        } else {
+            // If parsing fails (e.g., now hidden), remove it
+            Self::remove_entry(apps, path);
+        }
+    }
+
+    /// Check if a path is a .desktop file
+    fn is_desktop_file(path: &Path) -> bool {
+        path.extension().map(|e| e == "desktop").unwrap_or(false)
+    }
+
+    /// Start watching application directories for changes with incremental updates
     fn start_watching(
-        apps: Arc<RwLock<Vec<AppEntry>>>,
+        apps: Arc<RwLock<HashMap<PathBuf, AppEntry>>>,
         extra_dirs: &[PathBuf],
-    ) -> Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
+    ) -> Option<RecommendedWatcher> {
         let watch_dirs = Self::get_watch_directories(extra_dirs);
 
         if watch_dirs.is_empty() {
@@ -147,27 +235,99 @@ impl ApplicationsProvider {
             return None;
         }
 
-        // Clone extra_dirs for the closure
-        let extra_dirs_clone = extra_dirs.to_vec();
+        // Create watcher with event handler for incremental updates
+        let watcher_result = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            match res {
+                Ok(event) => {
+                    // Filter to only .desktop files
+                    let desktop_paths: Vec<_> = event
+                        .paths
+                        .iter()
+                        .filter(|p| Self::is_desktop_file(p))
+                        .collect();
 
-        // Create debounced watcher with 500ms timeout
-        let debouncer_result = new_debouncer(
-            Duration::from_millis(500),
-            move |result: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
-                match result {
-                    Ok(events) => {
-                    // Check if any event is relevant (.desktop file change)
-                    let dominated_path = events.iter().any(|e| {
-                        matches!(e.kind, DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous)
-                            && e.path
-                                .extension()
-                                .map(|ext| ext == "desktop")
-                                .unwrap_or(false)
-                    });
+                    if desktop_paths.is_empty() {
+                        return;
+                    }
 
-                    if dominated_path {
-                        debug!("Desktop file change detected, reloading applications");
-                        Self::load_applications_into(&apps, &extra_dirs_clone);
+                    // Handle each event type appropriately
+                    match event.kind {
+                        EventKind::Create(CreateKind::File) => {
+                            for path in desktop_paths {
+                                debug!("Desktop file created: {:?}", path);
+                                Self::add_entry(&apps, path);
+                            }
+                        }
+                        EventKind::Remove(RemoveKind::File) => {
+                            for path in desktop_paths {
+                                debug!("Desktop file removed: {:?}", path);
+                                Self::remove_entry(&apps, path);
+                            }
+                        }
+                        EventKind::Modify(ModifyKind::Data(_)) |
+                        EventKind::Modify(ModifyKind::Any) => {
+                            for path in desktop_paths {
+                                debug!("Desktop file modified: {:?}", path);
+                                Self::update_entry(&apps, path);
+                            }
+                        }
+                        // Handle rename as remove old + add new
+                        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                            for path in desktop_paths {
+                                debug!("Desktop file renamed from: {:?}", path);
+                                Self::remove_entry(&apps, path);
+                            }
+                        }
+                        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                            for path in desktop_paths {
+                                debug!("Desktop file renamed to: {:?}", path);
+                                Self::add_entry(&apps, path);
+                            }
+                        }
+                        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                            // Both paths in event.paths: [old, new]
+                            if event.paths.len() >= 2 {
+                                let old_path = &event.paths[0];
+                                let new_path = &event.paths[1];
+                                if Self::is_desktop_file(old_path) {
+                                    debug!("Desktop file renamed from: {:?}", old_path);
+                                    Self::remove_entry(&apps, old_path);
+                                }
+                                if Self::is_desktop_file(new_path) {
+                                    debug!("Desktop file renamed to: {:?}", new_path);
+                                    Self::add_entry(&apps, new_path);
+                                }
+                            }
+                        }
+                        // Catch-all for other create/modify events
+                        EventKind::Create(_) => {
+                            for path in desktop_paths {
+                                if path.exists() {
+                                    debug!("Desktop file created (generic): {:?}", path);
+                                    Self::add_entry(&apps, path);
+                                }
+                            }
+                        }
+                        EventKind::Remove(_) => {
+                            for path in desktop_paths {
+                                debug!("Desktop file removed (generic): {:?}", path);
+                                Self::remove_entry(&apps, path);
+                            }
+                        }
+                        EventKind::Modify(_) => {
+                            for path in desktop_paths {
+                                if path.exists() {
+                                    debug!("Desktop file modified (generic): {:?}", path);
+                                    Self::update_entry(&apps, path);
+                                } else {
+                                    debug!("Desktop file no longer exists: {:?}", path);
+                                    Self::remove_entry(&apps, path);
+                                }
+                            }
+                        }
+                        _ => {
+                            // Access, Other events - ignore
+                        }
                     }
                 }
                 Err(e) => {
@@ -176,14 +336,11 @@ impl ApplicationsProvider {
             }
         });
 
-        match debouncer_result {
-            Ok(mut debouncer) => {
+        match watcher_result {
+            Ok(mut watcher) => {
                 // Watch all directories
                 for dir in &watch_dirs {
-                    match debouncer
-                        .watcher()
-                        .watch(dir, notify::RecursiveMode::NonRecursive)
-                    {
+                    match watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
                         Ok(()) => {
                             info!("Watching for application changes: {:?}", dir);
                         }
@@ -193,7 +350,7 @@ impl ApplicationsProvider {
                     }
                 }
 
-                Some(debouncer)
+                Some(watcher)
             }
             Err(e) => {
                 error!("Failed to create file watcher: {}. Application index will not auto-update.", e);
@@ -203,8 +360,8 @@ impl ApplicationsProvider {
     }
 
     /// Load all desktop entries from XDG directories into the provided cache
-    fn load_applications_into(apps: &Arc<RwLock<Vec<AppEntry>>>, extra_dirs: &[PathBuf]) {
-        let mut entries = Vec::new();
+    fn load_applications_into(apps: &Arc<RwLock<HashMap<PathBuf, AppEntry>>>, extra_dirs: &[PathBuf]) {
+        let mut entries = HashMap::new();
 
         // Collect all paths to scan
         let mut all_paths: Vec<PathBuf> = Iter::new(freedesktop_desktop_entry::default_paths()).collect();
@@ -215,7 +372,7 @@ impl ApplicationsProvider {
                 if let Ok(read_dir) = std::fs::read_dir(dir) {
                     for entry in read_dir.flatten() {
                         let path = entry.path();
-                        if path.extension().map(|e| e == "desktop").unwrap_or(false) {
+                        if Self::is_desktop_file(&path) {
                             all_paths.push(path);
                         }
                     }
@@ -225,56 +382,8 @@ impl ApplicationsProvider {
 
         // Parse all desktop entries
         for path in all_paths {
-            match DesktopEntry::from_path::<&str>(&path, None) {
-                Ok(entry) => {
-                    // Skip entries marked as hidden or no-display
-                    if entry.no_display() {
-                        continue;
-                    }
-
-                    // Empty slice for default locale
-                    let locales: &[&str] = &[];
-
-                    // Skip entries without a name
-                    let name = match entry.name(locales) {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-
-                    // Skip entries without an exec command (not launchable)
-                    if entry.exec().is_none() {
-                        continue;
-                    }
-
-                    // Get the desktop file ID (filename without extension)
-                    let id = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let app = AppEntry {
-                        id,
-                        name,
-                        generic_name: entry.generic_name(locales).map(|s| s.to_string()),
-                        comment: entry.comment(locales).map(|s| s.to_string()),
-                        icon: entry.icon().unwrap_or("application-x-executable").to_string(),
-                        keywords: entry
-                            .keywords(locales)
-                            .map(|k| k.into_iter().map(String::from).collect())
-                            .unwrap_or_default(),
-                        terminal: entry.terminal(),
-                        path: path.clone(),
-                        launch_count: 0,
-                    };
-
-                    entries.push(app);
-                }
-                Err(e) => {
-                    // Only log at debug level - many .desktop files have minor parsing issues
-                    // (e.g., localized keys without default values) that don't affect functionality
-                    debug!("Failed to read desktop entry {:?}: {}", path, e);
-                }
+            if let Some(app) = Self::parse_desktop_file(&path) {
+                entries.insert(path, app);
             }
         }
 
@@ -332,7 +441,7 @@ impl ApplicationsProvider {
         if query.is_empty() {
             // Return most frequently used apps when query is empty
             let mut items: Vec<_> = apps
-                .iter()
+                .values()
                 .take(max_results)
                 .map(|app| {
                     Item::new(&app.name, "applications")
@@ -359,7 +468,7 @@ impl ApplicationsProvider {
 
         // Score and filter apps
         let mut scored: Vec<_> = apps
-            .iter()
+            .values()
             .filter_map(|app| self.score_app(app, query).map(|score| (app, score)))
             .collect();
 

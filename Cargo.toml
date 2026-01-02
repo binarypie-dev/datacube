@@ -22,7 +22,6 @@ freedesktop-icons = "0.2"
 
 # File watching
 notify = "7"
-notify-debouncer-mini = "0.5"
 
 # Fuzzy matching
 fuzzy-matcher = "0.3"
