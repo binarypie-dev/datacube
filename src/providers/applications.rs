@@ -312,14 +312,23 @@ impl ApplicationsProvider {
                     }
 
                     // Handle each event type appropriately
+                    // Note: Flatpak .desktop files are symlinks, so we need to handle
+                    // both file and symlink events, and check existence for ambiguous cases
                     match event.kind {
-                        EventKind::Create(CreateKind::File) => {
+                        EventKind::Create(CreateKind::File) |
+                        EventKind::Create(CreateKind::Any) => {
+                            // File or symlink created - add if it exists and is readable
                             for path in desktop_paths {
-                                debug!("Desktop file created: {:?}", path);
-                                Self::add_entry(&apps, path);
+                                // Check if path exists (follows symlinks)
+                                if path.exists() || path.is_symlink() {
+                                    debug!("Desktop file created: {:?}", path);
+                                    Self::add_entry(&apps, path);
+                                }
                             }
                         }
-                        EventKind::Remove(RemoveKind::File) => {
+                        EventKind::Remove(RemoveKind::File) |
+                        EventKind::Remove(RemoveKind::Any) => {
+                            // File or symlink removed
                             for path in desktop_paths {
                                 debug!("Desktop file removed: {:?}", path);
                                 Self::remove_entry(&apps, path);
@@ -360,21 +369,23 @@ impl ApplicationsProvider {
                                 }
                             }
                         }
-                        // Catch-all for other create/modify events
+                        // Catch-all for other create events
                         EventKind::Create(_) => {
                             for path in desktop_paths {
-                                if path.exists() {
+                                if path.exists() || path.is_symlink() {
                                     debug!("Desktop file created (generic): {:?}", path);
                                     Self::add_entry(&apps, path);
                                 }
                             }
                         }
+                        // Catch-all for other remove events
                         EventKind::Remove(_) => {
                             for path in desktop_paths {
                                 debug!("Desktop file removed (generic): {:?}", path);
                                 Self::remove_entry(&apps, path);
                             }
                         }
+                        // Catch-all for other modify events - check existence to determine action
                         EventKind::Modify(_) => {
                             for path in desktop_paths {
                                 if path.exists() {
@@ -424,25 +435,30 @@ impl ApplicationsProvider {
     fn load_applications_into(apps: &Arc<RwLock<HashMap<PathBuf, AppEntry>>>, extra_dirs: &[PathBuf]) {
         let mut entries = HashMap::new();
 
-        // Collect all paths to scan
+        // Collect all paths to scan from standard XDG locations
         let mut all_paths: Vec<PathBuf> = Iter::new(freedesktop_desktop_entry::default_paths()).collect();
 
-        // Add extra directories
-        for dir in extra_dirs {
-            if dir.is_dir() {
-                if let Ok(read_dir) = std::fs::read_dir(dir) {
-                    for entry in read_dir.flatten() {
-                        let path = entry.path();
-                        if Self::is_desktop_file(&path) {
-                            all_paths.push(path);
-                        }
+        // Get all directories we should scan (includes flatpak, snap, etc.)
+        let watch_dirs = Self::get_watch_directories(extra_dirs);
+
+        // Scan all watch directories for .desktop files
+        // This ensures flatpak and other directories are included in initial load
+        for dir in &watch_dirs {
+            if let Ok(read_dir) = std::fs::read_dir(dir) {
+                for entry in read_dir.flatten() {
+                    let path = entry.path();
+                    if Self::is_desktop_file(&path) {
+                        all_paths.push(path);
                     }
                 }
             }
         }
 
+        // Deduplicate paths (in case of overlap between default_paths and watch_dirs)
+        let unique_paths: HashSet<PathBuf> = all_paths.into_iter().collect();
+
         // Parse all desktop entries
-        for path in all_paths {
+        for path in unique_paths {
             if let Some(app) = Self::parse_desktop_file(&path) {
                 entries.insert(path, app);
             }

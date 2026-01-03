@@ -1,6 +1,6 @@
 [package]
 name = "datacube"
-version = "0.1.0"
+version = "0.1.6"
 edition = "2021"
 authors = ["Hypercube Project"]
 description = "Data provider service for application launchers and desktop utilities"
@@ -11,7 +11,14 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "net", "sync", "io-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = [
+  "full",
+  "net",
+  "sync",
+  "io-util",
+  "macros",
+  "rt-multi-thread",
+] }
 
 # Protocol buffers
 prost = "0.13"
