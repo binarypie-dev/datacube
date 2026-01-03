@@ -83,8 +83,11 @@ impl ApplicationsProvider {
     }
 
     /// Get all directories that should be watched for .desktop files
-    fn get_watch_directories(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    /// Returns (existing_dirs, potential_dirs) where potential_dirs are parent
+    /// directories that should be watched for new application directories to appear
+    fn get_watch_directories(extra_dirs: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let mut dirs = HashSet::new();
+        let mut parent_dirs = HashSet::new();
 
         // Standard XDG application directories
         for path in freedesktop_desktop_entry::default_paths() {
@@ -116,21 +119,31 @@ impl ApplicationsProvider {
             }
         }
 
-        // Flatpak directories
+        // Flatpak directories - watch even if they don't exist yet
         let flatpak_system = PathBuf::from("/var/lib/flatpak/exports/share/applications");
+        let flatpak_system_parent = PathBuf::from("/var/lib/flatpak/exports/share");
         if flatpak_system.is_dir() {
             dirs.insert(flatpak_system);
+        } else if flatpak_system_parent.is_dir() {
+            // Parent exists but applications dir doesn't - watch parent for it to be created
+            parent_dirs.insert(flatpak_system_parent);
         }
 
         let flatpak_user = home.join(".local/share/flatpak/exports/share/applications");
+        let flatpak_user_parent = home.join(".local/share/flatpak/exports/share");
         if flatpak_user.is_dir() {
             dirs.insert(flatpak_user);
+        } else if flatpak_user_parent.is_dir() {
+            parent_dirs.insert(flatpak_user_parent);
         }
 
         // Snap directory
         let snap_apps = PathBuf::from("/var/lib/snapd/desktop/applications");
+        let snap_parent = PathBuf::from("/var/lib/snapd/desktop");
         if snap_apps.is_dir() {
             dirs.insert(snap_apps);
+        } else if snap_parent.is_dir() {
+            parent_dirs.insert(snap_parent);
         }
 
         // Extra directories from config
@@ -140,7 +153,7 @@ impl ApplicationsProvider {
             }
         }
 
-        dirs.into_iter().collect()
+        (dirs.into_iter().collect(), parent_dirs.into_iter().collect())
     }
 
     /// Resolve an icon name to a file path
@@ -324,14 +337,31 @@ impl ApplicationsProvider {
         path.extension().map(|e| e == "desktop").unwrap_or(false)
     }
 
+    /// Check if a path is an "applications" directory we care about
+    fn is_applications_dir(path: &Path) -> bool {
+        path.file_name().map(|n| n == "applications").unwrap_or(false) && path.is_dir()
+    }
+
+    /// Scan a directory for .desktop files and add them to the cache
+    fn scan_directory(apps: &Arc<RwLock<HashMap<PathBuf, AppEntry>>>, dir: &Path) {
+        if let Ok(read_dir) = std::fs::read_dir(dir) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if Self::is_desktop_file(&path) {
+                    Self::add_entry(apps, &path);
+                }
+            }
+        }
+    }
+
     /// Start watching application directories for changes with incremental updates
     fn start_watching(
         apps: Arc<RwLock<HashMap<PathBuf, AppEntry>>>,
         extra_dirs: &[PathBuf],
     ) -> Option<RecommendedWatcher> {
-        let watch_dirs = Self::get_watch_directories(extra_dirs);
+        let (watch_dirs, parent_dirs) = Self::get_watch_directories(extra_dirs);
 
-        if watch_dirs.is_empty() {
+        if watch_dirs.is_empty() && parent_dirs.is_empty() {
             warn!("No application directories found to watch");
             return None;
         }
@@ -340,6 +370,19 @@ impl ApplicationsProvider {
         let watcher_result = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             match res {
                 Ok(event) => {
+                    // Check if a new "applications" directory was created (e.g., first flatpak install)
+                    for path in &event.paths {
+                        if Self::is_applications_dir(path) {
+                            match event.kind {
+                                EventKind::Create(_) => {
+                                    info!("New applications directory detected: {:?}", path);
+                                    Self::scan_directory(&apps, path);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     // Filter to only .desktop files
                     let desktop_paths: Vec<_> = event
                         .paths
@@ -450,7 +493,7 @@ impl ApplicationsProvider {
 
         match watcher_result {
             Ok(mut watcher) => {
-                // Watch all directories
+                // Watch existing application directories
                 for dir in &watch_dirs {
                     match watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
                         Ok(()) => {
@@ -458,6 +501,18 @@ impl ApplicationsProvider {
                         }
                         Err(e) => {
                             warn!("Failed to watch {:?}: {}", dir, e);
+                        }
+                    }
+                }
+
+                // Watch parent directories for new application directories to appear
+                for dir in &parent_dirs {
+                    match watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
+                        Ok(()) => {
+                            info!("Watching for new application directories in: {:?}", dir);
+                        }
+                        Err(e) => {
+                            warn!("Failed to watch parent {:?}: {}", dir, e);
                         }
                     }
                 }
@@ -479,7 +534,8 @@ impl ApplicationsProvider {
         let mut all_paths: Vec<PathBuf> = Iter::new(freedesktop_desktop_entry::default_paths()).collect();
 
         // Get all directories we should scan (includes flatpak, snap, etc.)
-        let watch_dirs = Self::get_watch_directories(extra_dirs);
+        // We only care about existing directories for initial load; parent_dirs are for watching
+        let (watch_dirs, _parent_dirs) = Self::get_watch_directories(extra_dirs);
 
         // Scan all watch directories for .desktop files
         // This ensures flatpak and other directories are included in initial load
