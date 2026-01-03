@@ -191,6 +191,46 @@ impl ApplicationsProvider {
             }
         }
 
+        // Explicit flatpak icon fallback - in case XDG_DATA_DIRS isn't set correctly
+        // This ensures flatpak icons are found even without proper environment
+        if let Some(path) = Self::resolve_flatpak_icon(icon) {
+            return Some(path);
+        }
+
+        None
+    }
+
+    /// Explicitly check flatpak icon directories
+    /// Fallback for when XDG_DATA_DIRS doesn't include flatpak paths
+    fn resolve_flatpak_icon(icon: &str) -> Option<String> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+
+        // Flatpak icon directories (system and user)
+        let flatpak_icon_bases = [
+            PathBuf::from("/var/lib/flatpak/exports/share/icons"),
+            home.join(".local/share/flatpak/exports/share/icons"),
+        ];
+
+        // Check each flatpak icon location
+        for base in &flatpak_icon_bases {
+            // Try scalable SVG first (preferred)
+            let svg_path = base.join("hicolor/scalable/apps").join(format!("{}.svg", icon));
+            if svg_path.exists() {
+                return Some(svg_path.to_string_lossy().to_string());
+            }
+
+            // Try each size from largest to smallest
+            for &size in ICON_SIZES {
+                let size_dir = format!("hicolor/{}x{}/apps", size, size);
+                for ext in ["svg", "png"] {
+                    let path = base.join(&size_dir).join(format!("{}.{}", icon, ext));
+                    if path.exists() {
+                        return Some(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
         None
     }
 

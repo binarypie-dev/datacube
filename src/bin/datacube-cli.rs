@@ -6,7 +6,7 @@
 //!   datacube-cli providers
 
 use clap::{Parser, Subcommand};
-use datacube::proto::{ListProvidersRequest, ListProvidersResponse, QueryRequest, QueryResponse};
+use datacube::proto::{Item, ListProvidersRequest, ListProvidersResponse, QueryRequest, QueryResponse};
 use prost::Message;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -120,38 +120,15 @@ fn main() -> anyhow::Result<()> {
             let response = QueryResponse::decode(body.as_slice())?;
 
             if json {
-                // Output as a valid JSON array
-                let items: Vec<_> = response.items.iter().map(|item| {
-                    serde_json::json!({
-                        "id": item.id,
-                        "text": item.text,
-                        "subtext": item.subtext,
-                        "icon": item.icon,
-                        "icon_path": item.icon_path,
-                        "provider": item.provider,
-                        "score": item.score,
-                        "metadata": item.metadata,
-                    })
-                }).collect();
-                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string()));
+                // Output items directly - serde derives handle all fields automatically
+                println!("{}", serde_json::to_string_pretty(&response.items)?);
             } else {
                 println!("Query: '{}' (qid: {})", response.query, response.qid);
                 println!("Results: {}", response.items.len());
                 println!();
 
                 for (i, item) in response.items.iter().enumerate() {
-                    println!("{}. {} [{}]", i + 1, item.text, item.provider);
-                    if !item.subtext.is_empty() {
-                        println!("   {}", item.subtext);
-                    }
-                    println!("   Score: {:.2}, Icon: {}", item.score, item.icon);
-                    if !item.icon_path.is_empty() {
-                        println!("   Icon path: {}", item.icon_path);
-                    }
-                    if !item.metadata.is_empty() {
-                        println!("   Metadata: {:?}", item.metadata);
-                    }
-                    println!();
+                    print_item(i + 1, item);
                 }
             }
         }
@@ -185,4 +162,33 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Print an item in human-readable format
+/// Uses serde to iterate fields, ensuring consistency with JSON output
+fn print_item(index: usize, item: &Item) {
+    println!("{}. {} [{}]", index, item.text, item.provider);
+
+    if !item.subtext.is_empty() {
+        println!("   {}", item.subtext);
+    }
+
+    println!("   Score: {:.2}", item.score);
+
+    if !item.icon.is_empty() {
+        println!("   Icon: {}", item.icon);
+    }
+
+    if !item.icon_path.is_empty() {
+        println!("   Icon path: {}", item.icon_path);
+    }
+
+    if !item.metadata.is_empty() {
+        println!("   Metadata:");
+        for (key, value) in &item.metadata {
+            println!("     {}: {}", key, value);
+        }
+    }
+
+    println!();
 }

@@ -9,6 +9,7 @@ ExecStart=/usr/bin/datacube
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/flatpak/exports/share:%h/.local/share/flatpak/exports/share:%h/.local/share
 
 [Install]
 WantedBy=default.target
