@@ -42,6 +42,8 @@ message Item {
   map<string, string> metadata = 7;
   // Resolved icon file path (SVG preferred, then largest PNG)
   string icon_path = 8;
+  // Source of the item (e.g., "native", "flatpak", "snap")
+  string source = 9;
 }
 
 // List available providers

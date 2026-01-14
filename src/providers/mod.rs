@@ -32,6 +32,8 @@ pub struct Item {
     pub score: f32,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+    /// Source of the item (e.g., "native", "flatpak", "snap")
+    pub source: String,
 }
 
 impl Item {
@@ -47,6 +49,7 @@ impl Item {
             provider: provider.into(),
             score: 0.0,
             metadata: HashMap::new(),
+            source: String::new(),
         }
     }
 
@@ -74,6 +77,11 @@ impl Item {
         self.metadata.insert(key.into(), value.into());
         self
     }
+
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = source.into();
+        self
+    }
 }
 
 impl From<Item> for crate::proto::Item {
@@ -87,6 +95,7 @@ impl From<Item> for crate::proto::Item {
             provider: item.provider,
             score: item.score,
             metadata: item.metadata,
+            source: item.source,
         }
     }
 }

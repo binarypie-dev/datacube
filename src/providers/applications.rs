@@ -23,6 +23,36 @@ use tracing::{debug, error, info, warn};
 /// Standard icon sizes to search (largest first)
 const ICON_SIZES: &[u16] = &[512, 256, 128, 96, 64, 48, 32, 24, 22, 16];
 
+/// Source type for an application
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppSource {
+    Native,
+    Flatpak,
+    Snap,
+}
+
+impl AppSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AppSource::Native => "native",
+            AppSource::Flatpak => "flatpak",
+            AppSource::Snap => "snap",
+        }
+    }
+
+    /// Determine the source based on the .desktop file path
+    fn from_path(path: &Path) -> Self {
+        let path_str = path.to_string_lossy();
+        if path_str.contains("/flatpak/") {
+            AppSource::Flatpak
+        } else if path_str.contains("/snapd/") {
+            AppSource::Snap
+        } else {
+            AppSource::Native
+        }
+    }
+}
+
 /// A cached application entry
 #[derive(Debug, Clone)]
 struct AppEntry {
@@ -44,6 +74,8 @@ struct AppEntry {
     terminal: bool,
     /// Launch count for ranking
     launch_count: u32,
+    /// Source of the application (native, flatpak, snap)
+    source: AppSource,
 }
 
 /// Provider for installed applications
@@ -282,6 +314,7 @@ impl ApplicationsProvider {
 
         let icon = entry.icon().unwrap_or("application-x-executable").to_string();
         let icon_path = Self::resolve_icon_path(&icon);
+        let source = AppSource::from_path(path);
 
         Some(AppEntry {
             id,
@@ -296,6 +329,7 @@ impl ApplicationsProvider {
                 .unwrap_or_default(),
             terminal: entry.terminal(),
             launch_count: 0,
+            source,
         })
     }
 
@@ -629,6 +663,7 @@ impl ApplicationsProvider {
                         .with_score(app.launch_count as f32 / 100.0)
                         .with_metadata("desktop_id", &app.id)
                         .with_metadata("terminal", if app.terminal { "true" } else { "false" })
+                        .with_source(app.source.as_str())
                 })
                 .collect();
 
@@ -669,6 +704,7 @@ impl ApplicationsProvider {
                     .with_score(normalized_score)
                     .with_metadata("desktop_id", &app.id)
                     .with_metadata("terminal", if app.terminal { "true" } else { "false" })
+                    .with_source(app.source.as_str())
             })
             .collect()
     }
