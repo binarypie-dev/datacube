@@ -1,6 +1,6 @@
 [package]
 name = "datacube"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["Hypercube Project"]
 description = "Data provider service for application launchers and desktop utilities"
