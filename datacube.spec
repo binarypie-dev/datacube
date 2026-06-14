@@ -1,7 +1,7 @@
 %global crate datacube
 
 Name:           %{crate}
-Version:        0.1.10
+Version:        0.1.11
 Release:        1%{?dist}
 Summary:        Data provider service for application launchers and desktop utilities
 

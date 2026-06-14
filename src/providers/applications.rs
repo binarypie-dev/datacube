@@ -107,11 +107,23 @@ impl ApplicationsProvider {
         let apps = Arc::new(RwLock::new(HashMap::new()));
         let path_to_id = Arc::new(RwLock::new(HashMap::new()));
 
-        // Load applications initially
-        Self::load_applications_into(&apps, &path_to_id, &extra_dirs);
-
-        // Set up file watching
+        // Set up file watching first so changes that happen during the initial
+        // load are not missed.
         let watcher = Self::start_watching(Arc::clone(&apps), Arc::clone(&path_to_id), &extra_dirs);
+
+        // Load applications in a background thread so the daemon can bind its
+        // socket and start serving immediately. The initial load - and icon
+        // resolution in particular - is filesystem-heavy and would otherwise
+        // delay startup by seconds, blocking clients (e.g. quickshell) from
+        // searching until the whole index was built.
+        {
+            let apps = Arc::clone(&apps);
+            let path_to_id = Arc::clone(&path_to_id);
+            let extra_dirs = extra_dirs.clone();
+            std::thread::spawn(move || {
+                Self::load_applications_into(&apps, &path_to_id, &extra_dirs);
+            });
+        }
 
         Self {
             apps,
@@ -394,7 +406,9 @@ impl ApplicationsProvider {
             .to_string();
 
         let icon = entry.icon().unwrap_or("application-x-executable").to_string();
-        let icon_path = Self::resolve_icon_path(&icon);
+        // Icon path is resolved separately via `resolve_entry_icon`. Resolving
+        // an icon involves many filesystem lookups, so we keep parsing cheap and
+        // resolve icons in the background during the initial bulk load.
         let source = AppSource::from_path(path);
 
         Some(AppEntry {
@@ -404,7 +418,7 @@ impl ApplicationsProvider {
             generic_name: entry.generic_name(locales).map(|s| s.to_string()),
             comment: entry.comment(locales).map(|s| s.to_string()),
             icon,
-            icon_path,
+            icon_path: None,
             keywords: entry
                 .keywords(locales)
                 .map(|k| k.into_iter().map(String::from).collect())
@@ -415,6 +429,15 @@ impl ApplicationsProvider {
         })
     }
 
+    /// Resolve and attach the icon file path for an entry.
+    ///
+    /// This performs many filesystem lookups, so it is kept separate from
+    /// `parse_desktop_file` to allow the bulk loader to make applications
+    /// searchable before icons have been resolved.
+    fn resolve_entry_icon(entry: &mut AppEntry) {
+        entry.icon_path = Self::resolve_icon_path(&entry.icon);
+    }
+
     /// Add a single desktop entry to the cache, respecting XDG override policy
     /// Only adds if no higher-priority entry with the same ID exists
     fn add_entry(
@@ -423,7 +446,8 @@ impl ApplicationsProvider {
         path: &Path,
         extra_dirs: &[PathBuf],
     ) {
-        if let Some(entry) = Self::parse_desktop_file(path) {
+        if let Some(mut entry) = Self::parse_desktop_file(path) {
+            Self::resolve_entry_icon(&mut entry);
             let id = entry.id.clone();
             let new_priority = Self::get_directory_priority(path, extra_dirs);
 
@@ -517,7 +541,8 @@ impl ApplicationsProvider {
                             }
 
                             if let Some(promote_path) = best_path {
-                                if let Some(entry) = Self::parse_desktop_file(&promote_path) {
+                                if let Some(mut entry) = Self::parse_desktop_file(&promote_path) {
+                                    Self::resolve_entry_icon(&mut entry);
                                     debug!(
                                         "Promoting {} from {:?} after removal of higher-priority entry",
                                         entry.name, promote_path
@@ -539,7 +564,8 @@ impl ApplicationsProvider {
         path: &Path,
         extra_dirs: &[PathBuf],
     ) {
-        if let Some(entry) = Self::parse_desktop_file(path) {
+        if let Some(mut entry) = Self::parse_desktop_file(path) {
+            Self::resolve_entry_icon(&mut entry);
             let id = entry.id.clone();
 
             if let (Ok(mut apps_guard), Ok(mut path_guard)) = (apps.write(), path_to_id.write()) {
@@ -780,6 +806,13 @@ impl ApplicationsProvider {
 
     /// Load all desktop entries from XDG directories into the provided cache
     /// Processes directories in XDG precedence order so higher-priority entries override lower ones
+    ///
+    /// This runs in two phases so applications become searchable as fast as
+    /// possible:
+    /// 1. Parse all `.desktop` files (cheap) and publish them - apps are now
+    ///    searchable, just without resolved icon paths.
+    /// 2. Resolve icon paths (filesystem-heavy) in the background and patch them
+    ///    into the cache.
     fn load_applications_into(
         apps: &Arc<RwLock<HashMap<String, AppEntry>>>,
         path_to_id: &Arc<RwLock<HashMap<PathBuf, String>>>,
@@ -799,7 +832,7 @@ impl ApplicationsProvider {
             debug!("  Priority {}: {:?}", priority, dir);
         }
 
-        // Process directories in order - first directory wins for each ID
+        // Phase 1: parse metadata (no icon resolution) - first directory wins for each ID
         for dir in &ordered_dirs {
             if let Ok(read_dir) = std::fs::read_dir(dir) {
                 for entry in read_dir.flatten() {
@@ -827,16 +860,44 @@ impl ApplicationsProvider {
             }
         }
 
-        info!(
-            "Loaded {} unique applications (from {} total desktop files)",
-            entries.len(),
-            path_map.len()
-        );
+        let app_count = entries.len();
 
+        // Publish metadata immediately - applications are now searchable.
         if let (Ok(mut apps_guard), Ok(mut path_guard)) = (apps.write(), path_to_id.write()) {
             *apps_guard = entries;
             *path_guard = path_map;
         }
+
+        info!(
+            "Loaded {} unique applications - resolving icons in background",
+            app_count
+        );
+
+        // Phase 2: resolve icon paths. Snapshot (id, icon) first so the lock is
+        // not held during the filesystem lookups, then patch each entry in.
+        let to_resolve: Vec<(String, String)> = match apps.read() {
+            Ok(guard) => guard.values().map(|a| (a.id.clone(), a.icon.clone())).collect(),
+            Err(_) => return,
+        };
+
+        for (id, icon) in to_resolve {
+            let resolved = Self::resolve_icon_path(&icon);
+            // Skip the write lock entirely if there is nothing to store.
+            if resolved.is_none() {
+                continue;
+            }
+            if let Ok(mut guard) = apps.write() {
+                // The entry may have been replaced/removed by the watcher in the
+                // meantime; only patch it if it still matches.
+                if let Some(app) = guard.get_mut(&id) {
+                    if app.icon == icon && app.icon_path.is_none() {
+                        app.icon_path = resolved;
+                    }
+                }
+            }
+        }
+
+        info!("Finished resolving icons for {} applications", app_count);
     }
 
     /// Calculate a search score for an app against a query
