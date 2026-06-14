@@ -151,3 +151,50 @@ impl Config {
         config_dir.join("datacube").join("config.toml")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sane() {
+        let config = Config::default();
+        assert_eq!(config.max_results, 50);
+        assert!(config.providers.applications.enabled);
+        assert!(config.providers.calculator.enabled);
+        assert_eq!(config.providers.calculator.prefix, "=");
+        assert!(config
+            .socket_path
+            .to_string_lossy()
+            .ends_with("datacube.sock"));
+    }
+
+    #[test]
+    fn toml_round_trip() {
+        let config = Config::default();
+        let serialized = toml::to_string(&config).expect("serialize");
+        let parsed: Config = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(parsed.max_results, config.max_results);
+        assert_eq!(
+            parsed.providers.calculator.prefix,
+            config.providers.calculator.prefix
+        );
+        assert_eq!(parsed.socket_path, config.socket_path);
+    }
+
+    #[test]
+    fn partial_config_uses_defaults() {
+        // Only override max_results; everything else should fall back to defaults.
+        let parsed: Config = toml::from_str("max_results = 7").expect("deserialize");
+        assert_eq!(parsed.max_results, 7);
+        assert!(parsed.providers.applications.enabled);
+        assert_eq!(parsed.providers.calculator.prefix, "=");
+    }
+
+    #[test]
+    fn empty_config_is_all_defaults() {
+        let parsed: Config = toml::from_str("").expect("deserialize");
+        assert_eq!(parsed.max_results, 50);
+        assert!(parsed.providers.applications.enabled);
+    }
+}

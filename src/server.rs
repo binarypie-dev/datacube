@@ -190,3 +190,112 @@ async fn handle_list_providers(
 
     Some((MessageType::ListProvidersResponse, response.encode_to_vec()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::ListProvidersRequest;
+    use crate::providers::CalculatorProvider;
+    use std::time::Duration;
+    use tokio::net::UnixStream;
+
+    async fn spawn_calculator_server() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("datacube-it-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("datacube.sock");
+
+        let mut config = Config::default();
+        config.socket_path = socket.clone();
+        // Keep the test hermetic: don't scan the host for applications.
+        config.providers.applications.enabled = false;
+
+        let manager = ProviderManager::new();
+        manager.register(CalculatorProvider::new()).await;
+
+        let server = Server::new(config, manager);
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        // Wait for the socket to be bound.
+        for _ in 0..200 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        socket
+    }
+
+    async fn write_frame(stream: &mut UnixStream, msg_type: u8, body: &[u8]) {
+        let mut header = vec![msg_type];
+        header.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        stream.write_all(&header).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn read_frame(stream: &mut UnixStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.unwrap();
+        (header[0], body)
+    }
+
+    #[tokio::test]
+    async fn query_round_trip_over_socket() {
+        let socket = spawn_calculator_server().await;
+        let mut stream = UnixStream::connect(&socket).await.expect("connect");
+
+        let request = QueryRequest {
+            query: "=2+2".to_string(),
+            max_results: 10,
+            providers: vec![],
+            exact: false,
+        };
+        write_frame(
+            &mut stream,
+            MessageType::Query as u8,
+            &request.encode_to_vec(),
+        )
+        .await;
+
+        let (msg_type, body) = read_frame(&mut stream).await;
+        assert_eq!(msg_type, MessageType::QueryResponse as u8);
+
+        let response = QueryResponse::decode(body.as_slice()).unwrap();
+        assert!(
+            !response.items.is_empty(),
+            "calculator should return a result"
+        );
+        assert_eq!(response.items[0].text, "4");
+        assert_eq!(response.items[0].provider, "calculator");
+        assert!(!response.qid.is_empty());
+
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_providers_over_socket() {
+        let socket = spawn_calculator_server().await;
+        let mut stream = UnixStream::connect(&socket).await.expect("connect");
+
+        let request = ListProvidersRequest {};
+        write_frame(
+            &mut stream,
+            MessageType::ListProviders as u8,
+            &request.encode_to_vec(),
+        )
+        .await;
+
+        let (msg_type, body) = read_frame(&mut stream).await;
+        assert_eq!(msg_type, MessageType::ListProvidersResponse as u8);
+
+        let response = ListProvidersResponse::decode(body.as_slice()).unwrap();
+        assert!(response.providers.iter().any(|p| p.name == "calculator"));
+
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
+}
