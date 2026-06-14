@@ -51,11 +51,7 @@ impl ProviderManager {
             .cloned()
             .collect();
 
-        debug!(
-            "Querying {} providers for '{}'",
-            applicable.len(),
-            query
-        );
+        debug!("Querying {} providers for '{}'", applicable.len(), query);
 
         // Query all applicable providers concurrently
         let futures: Vec<_> = applicable
@@ -71,13 +67,16 @@ impl ProviderManager {
 
         // Combine and sort by score
         let mut items: Vec<Item> = results.into_iter().flatten().collect();
-        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         items.truncate(max_results);
 
         debug!("Query returned {} items", items.len());
         items
     }
-
 }
 
 impl Default for ProviderManager {
