@@ -35,7 +35,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Initialize logging
-    let log_level = if args.debug { Level::DEBUG } else { Level::INFO };
+    let log_level = if args.debug {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_target(false)
@@ -76,8 +80,10 @@ async fn main() -> anyhow::Result<()> {
         manager.register(CalculatorProvider::new()).await;
     }
 
-
-    info!("Registered {} providers", manager.list_providers().await.len());
+    info!(
+        "Registered {} providers",
+        manager.list_providers().await.len()
+    );
 
     // Create and run server
     let server = Server::new(config, manager);

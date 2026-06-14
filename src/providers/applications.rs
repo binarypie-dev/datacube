@@ -107,11 +107,23 @@ impl ApplicationsProvider {
         let apps = Arc::new(RwLock::new(HashMap::new()));
         let path_to_id = Arc::new(RwLock::new(HashMap::new()));
 
-        // Load applications initially
-        Self::load_applications_into(&apps, &path_to_id, &extra_dirs);
-
-        // Set up file watching
+        // Set up file watching first so changes that happen during the initial
+        // load are not missed.
         let watcher = Self::start_watching(Arc::clone(&apps), Arc::clone(&path_to_id), &extra_dirs);
+
+        // Load applications in a background thread so the daemon can bind its
+        // socket and start serving immediately. The initial load - and icon
+        // resolution in particular - is filesystem-heavy and would otherwise
+        // delay startup by seconds, blocking clients (e.g. quickshell) from
+        // searching until the whole index was built.
+        {
+            let apps = Arc::clone(&apps);
+            let path_to_id = Arc::clone(&path_to_id);
+            let extra_dirs = extra_dirs.clone();
+            std::thread::spawn(move || {
+                Self::load_applications_into(&apps, &path_to_id, &extra_dirs);
+            });
+        }
 
         Self {
             apps,
@@ -222,10 +234,7 @@ impl ApplicationsProvider {
         }
 
         // System applications
-        for sys_path in &[
-            "/usr/share/applications",
-            "/usr/local/share/applications",
-        ] {
+        for sys_path in &["/usr/share/applications", "/usr/local/share/applications"] {
             let p = PathBuf::from(sys_path);
             if p.is_dir() {
                 dirs.insert(p);
@@ -266,7 +275,10 @@ impl ApplicationsProvider {
             }
         }
 
-        (dirs.into_iter().collect(), parent_dirs.into_iter().collect())
+        (
+            dirs.into_iter().collect(),
+            parent_dirs.into_iter().collect(),
+        )
     }
 
     /// Resolve an icon name to a file path
@@ -290,7 +302,12 @@ impl ApplicationsProvider {
 
         // Try each size from largest to smallest to find the best PNG
         for &size in ICON_SIZES {
-            if let Some(path) = lookup(icon).with_size(size).with_scale(1).with_theme("hicolor").find() {
+            if let Some(path) = lookup(icon)
+                .with_size(size)
+                .with_scale(1)
+                .with_theme("hicolor")
+                .find()
+            {
                 return Some(path.to_string_lossy().to_string());
             }
         }
@@ -303,10 +320,7 @@ impl ApplicationsProvider {
         }
 
         // Check common fallback locations
-        let fallback_dirs = [
-            "/usr/share/pixmaps",
-            "/usr/share/icons",
-        ];
+        let fallback_dirs = ["/usr/share/pixmaps", "/usr/share/icons"];
 
         for dir in fallback_dirs {
             for ext in ["svg", "png", "xpm"] {
@@ -340,7 +354,9 @@ impl ApplicationsProvider {
         // Check each flatpak icon location
         for base in &flatpak_icon_bases {
             // Try scalable SVG first (preferred)
-            let svg_path = base.join("hicolor/scalable/apps").join(format!("{}.svg", icon));
+            let svg_path = base
+                .join("hicolor/scalable/apps")
+                .join(format!("{}.svg", icon));
             if svg_path.exists() {
                 return Some(svg_path.to_string_lossy().to_string());
             }
@@ -393,8 +409,13 @@ impl ApplicationsProvider {
             .unwrap_or("")
             .to_string();
 
-        let icon = entry.icon().unwrap_or("application-x-executable").to_string();
-        let icon_path = Self::resolve_icon_path(&icon);
+        let icon = entry
+            .icon()
+            .unwrap_or("application-x-executable")
+            .to_string();
+        // Icon path is resolved separately via `resolve_entry_icon`. Resolving
+        // an icon involves many filesystem lookups, so we keep parsing cheap and
+        // resolve icons in the background during the initial bulk load.
         let source = AppSource::from_path(path);
 
         Some(AppEntry {
@@ -404,7 +425,7 @@ impl ApplicationsProvider {
             generic_name: entry.generic_name(locales).map(|s| s.to_string()),
             comment: entry.comment(locales).map(|s| s.to_string()),
             icon,
-            icon_path,
+            icon_path: None,
             keywords: entry
                 .keywords(locales)
                 .map(|k| k.into_iter().map(String::from).collect())
@@ -415,6 +436,15 @@ impl ApplicationsProvider {
         })
     }
 
+    /// Resolve and attach the icon file path for an entry.
+    ///
+    /// This performs many filesystem lookups, so it is kept separate from
+    /// `parse_desktop_file` to allow the bulk loader to make applications
+    /// searchable before icons have been resolved.
+    fn resolve_entry_icon(entry: &mut AppEntry) {
+        entry.icon_path = Self::resolve_icon_path(&entry.icon);
+    }
+
     /// Add a single desktop entry to the cache, respecting XDG override policy
     /// Only adds if no higher-priority entry with the same ID exists
     fn add_entry(
@@ -423,14 +453,16 @@ impl ApplicationsProvider {
         path: &Path,
         extra_dirs: &[PathBuf],
     ) {
-        if let Some(entry) = Self::parse_desktop_file(path) {
+        if let Some(mut entry) = Self::parse_desktop_file(path) {
+            Self::resolve_entry_icon(&mut entry);
             let id = entry.id.clone();
             let new_priority = Self::get_directory_priority(path, extra_dirs);
 
             if let (Ok(mut apps_guard), Ok(mut path_guard)) = (apps.write(), path_to_id.write()) {
                 // Check if an entry with this ID already exists
                 if let Some(existing) = apps_guard.get(&id) {
-                    let existing_priority = Self::get_directory_priority(&existing.path, extra_dirs);
+                    let existing_priority =
+                        Self::get_directory_priority(&existing.path, extra_dirs);
 
                     // Only replace if new entry has higher priority (lower number)
                     match (new_priority, existing_priority) {
@@ -502,7 +534,8 @@ impl ApplicationsProvider {
                             let mut best_priority: Option<usize> = None;
 
                             for candidate_path in candidates {
-                                let priority = Self::get_directory_priority(&candidate_path, extra_dirs);
+                                let priority =
+                                    Self::get_directory_priority(&candidate_path, extra_dirs);
                                 match (priority, best_priority) {
                                     (Some(p), None) => {
                                         best_path = Some(candidate_path);
@@ -517,7 +550,8 @@ impl ApplicationsProvider {
                             }
 
                             if let Some(promote_path) = best_path {
-                                if let Some(entry) = Self::parse_desktop_file(&promote_path) {
+                                if let Some(mut entry) = Self::parse_desktop_file(&promote_path) {
+                                    Self::resolve_entry_icon(&mut entry);
                                     debug!(
                                         "Promoting {} from {:?} after removal of higher-priority entry",
                                         entry.name, promote_path
@@ -539,7 +573,8 @@ impl ApplicationsProvider {
         path: &Path,
         extra_dirs: &[PathBuf],
     ) {
-        if let Some(entry) = Self::parse_desktop_file(path) {
+        if let Some(mut entry) = Self::parse_desktop_file(path) {
+            Self::resolve_entry_icon(&mut entry);
             let id = entry.id.clone();
 
             if let (Ok(mut apps_guard), Ok(mut path_guard)) = (apps.write(), path_to_id.write()) {
@@ -562,7 +597,10 @@ impl ApplicationsProvider {
 
                 match (new_priority, existing_priority) {
                     (Some(new_p), Some(existing_p)) if new_p < existing_p => {
-                        debug!("Updated entry now has higher priority, promoting: {} from {:?}", entry.name, path);
+                        debug!(
+                            "Updated entry now has higher priority, promoting: {} from {:?}",
+                            entry.name, path
+                        );
                         apps_guard.insert(id.clone(), entry);
                     }
                     _ => {}
@@ -582,7 +620,10 @@ impl ApplicationsProvider {
 
     /// Check if a path is an "applications" directory we care about
     fn is_applications_dir(path: &Path) -> bool {
-        path.file_name().map(|n| n == "applications").unwrap_or(false) && path.is_dir()
+        path.file_name()
+            .map(|n| n == "applications")
+            .unwrap_or(false)
+            && path.is_dir()
     }
 
     /// Scan a directory for .desktop files and add them to the cache
@@ -619,129 +660,165 @@ impl ApplicationsProvider {
         let extra_dirs_owned: Vec<PathBuf> = extra_dirs.to_vec();
 
         // Create watcher with event handler for incremental updates
-        let watcher_result = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            match res {
-                Ok(event) => {
-                    // Check if a new "applications" directory was created (e.g., first flatpak install)
-                    for path in &event.paths {
-                        if Self::is_applications_dir(path) {
-                            match event.kind {
-                                EventKind::Create(_) => {
-                                    info!("New applications directory detected: {:?}", path);
-                                    Self::scan_directory(&apps, &path_to_id, path, &extra_dirs_owned);
+        let watcher_result =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        // Check if a new "applications" directory was created (e.g., first flatpak install)
+                        for path in &event.paths {
+                            if Self::is_applications_dir(path) {
+                                match event.kind {
+                                    EventKind::Create(_) => {
+                                        info!("New applications directory detected: {:?}", path);
+                                        Self::scan_directory(
+                                            &apps,
+                                            &path_to_id,
+                                            path,
+                                            &extra_dirs_owned,
+                                        );
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
-                    }
 
-                    // Filter to only .desktop files
-                    let desktop_paths: Vec<_> = event
-                        .paths
-                        .iter()
-                        .filter(|p| Self::is_desktop_file(p))
-                        .collect();
+                        // Filter to only .desktop files
+                        let desktop_paths: Vec<_> = event
+                            .paths
+                            .iter()
+                            .filter(|p| Self::is_desktop_file(p))
+                            .collect();
 
-                    if desktop_paths.is_empty() {
-                        return;
-                    }
+                        if desktop_paths.is_empty() {
+                            return;
+                        }
 
-                    // Handle each event type appropriately
-                    // Note: Flatpak .desktop files are symlinks, so we need to handle
-                    // both file and symlink events, and check existence for ambiguous cases
-                    match event.kind {
-                        EventKind::Create(CreateKind::File) |
-                        EventKind::Create(CreateKind::Any) => {
-                            // File or symlink created - add if it exists and is readable
-                            for path in desktop_paths {
-                                // Check if path exists (follows symlinks)
-                                if path.exists() || path.is_symlink() {
-                                    debug!("Desktop file created: {:?}", path);
-                                    Self::add_entry(&apps, &path_to_id, path, &extra_dirs_owned);
+                        // Handle each event type appropriately
+                        // Note: Flatpak .desktop files are symlinks, so we need to handle
+                        // both file and symlink events, and check existence for ambiguous cases
+                        match event.kind {
+                            EventKind::Create(CreateKind::File)
+                            | EventKind::Create(CreateKind::Any) => {
+                                // File or symlink created - add if it exists and is readable
+                                for path in desktop_paths {
+                                    // Check if path exists (follows symlinks)
+                                    if path.exists() || path.is_symlink() {
+                                        debug!("Desktop file created: {:?}", path);
+                                        Self::add_entry(
+                                            &apps,
+                                            &path_to_id,
+                                            path,
+                                            &extra_dirs_owned,
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        EventKind::Remove(RemoveKind::File) |
-                        EventKind::Remove(RemoveKind::Any) => {
-                            // File or symlink removed
-                            for path in desktop_paths {
-                                debug!("Desktop file removed: {:?}", path);
-                                Self::remove_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                            }
-                        }
-                        EventKind::Modify(ModifyKind::Data(_)) |
-                        EventKind::Modify(ModifyKind::Any) => {
-                            for path in desktop_paths {
-                                debug!("Desktop file modified: {:?}", path);
-                                Self::update_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                            }
-                        }
-                        // Handle rename as remove old + add new
-                        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                            for path in desktop_paths {
-                                debug!("Desktop file renamed from: {:?}", path);
-                                Self::remove_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                            }
-                        }
-                        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                            for path in desktop_paths {
-                                debug!("Desktop file renamed to: {:?}", path);
-                                Self::add_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                            }
-                        }
-                        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-                            // Both paths in event.paths: [old, new]
-                            if event.paths.len() >= 2 {
-                                let old_path = &event.paths[0];
-                                let new_path = &event.paths[1];
-                                if Self::is_desktop_file(old_path) {
-                                    debug!("Desktop file renamed from: {:?}", old_path);
-                                    Self::remove_entry(&apps, &path_to_id, old_path, &extra_dirs_owned);
-                                }
-                                if Self::is_desktop_file(new_path) {
-                                    debug!("Desktop file renamed to: {:?}", new_path);
-                                    Self::add_entry(&apps, &path_to_id, new_path, &extra_dirs_owned);
-                                }
-                            }
-                        }
-                        // Catch-all for other create events
-                        EventKind::Create(_) => {
-                            for path in desktop_paths {
-                                if path.exists() || path.is_symlink() {
-                                    debug!("Desktop file created (generic): {:?}", path);
-                                    Self::add_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                                }
-                            }
-                        }
-                        // Catch-all for other remove events
-                        EventKind::Remove(_) => {
-                            for path in desktop_paths {
-                                debug!("Desktop file removed (generic): {:?}", path);
-                                Self::remove_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                            }
-                        }
-                        // Catch-all for other modify events - check existence to determine action
-                        EventKind::Modify(_) => {
-                            for path in desktop_paths {
-                                if path.exists() {
-                                    debug!("Desktop file modified (generic): {:?}", path);
-                                    Self::update_entry(&apps, &path_to_id, path, &extra_dirs_owned);
-                                } else {
-                                    debug!("Desktop file no longer exists: {:?}", path);
+                            EventKind::Remove(RemoveKind::File)
+                            | EventKind::Remove(RemoveKind::Any) => {
+                                // File or symlink removed
+                                for path in desktop_paths {
+                                    debug!("Desktop file removed: {:?}", path);
                                     Self::remove_entry(&apps, &path_to_id, path, &extra_dirs_owned);
                                 }
                             }
-                        }
-                        _ => {
-                            // Access, Other events - ignore
+                            EventKind::Modify(ModifyKind::Data(_))
+                            | EventKind::Modify(ModifyKind::Any) => {
+                                for path in desktop_paths {
+                                    debug!("Desktop file modified: {:?}", path);
+                                    Self::update_entry(&apps, &path_to_id, path, &extra_dirs_owned);
+                                }
+                            }
+                            // Handle rename as remove old + add new
+                            EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                                for path in desktop_paths {
+                                    debug!("Desktop file renamed from: {:?}", path);
+                                    Self::remove_entry(&apps, &path_to_id, path, &extra_dirs_owned);
+                                }
+                            }
+                            EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                                for path in desktop_paths {
+                                    debug!("Desktop file renamed to: {:?}", path);
+                                    Self::add_entry(&apps, &path_to_id, path, &extra_dirs_owned);
+                                }
+                            }
+                            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                                // Both paths in event.paths: [old, new]
+                                if event.paths.len() >= 2 {
+                                    let old_path = &event.paths[0];
+                                    let new_path = &event.paths[1];
+                                    if Self::is_desktop_file(old_path) {
+                                        debug!("Desktop file renamed from: {:?}", old_path);
+                                        Self::remove_entry(
+                                            &apps,
+                                            &path_to_id,
+                                            old_path,
+                                            &extra_dirs_owned,
+                                        );
+                                    }
+                                    if Self::is_desktop_file(new_path) {
+                                        debug!("Desktop file renamed to: {:?}", new_path);
+                                        Self::add_entry(
+                                            &apps,
+                                            &path_to_id,
+                                            new_path,
+                                            &extra_dirs_owned,
+                                        );
+                                    }
+                                }
+                            }
+                            // Catch-all for other create events
+                            EventKind::Create(_) => {
+                                for path in desktop_paths {
+                                    if path.exists() || path.is_symlink() {
+                                        debug!("Desktop file created (generic): {:?}", path);
+                                        Self::add_entry(
+                                            &apps,
+                                            &path_to_id,
+                                            path,
+                                            &extra_dirs_owned,
+                                        );
+                                    }
+                                }
+                            }
+                            // Catch-all for other remove events
+                            EventKind::Remove(_) => {
+                                for path in desktop_paths {
+                                    debug!("Desktop file removed (generic): {:?}", path);
+                                    Self::remove_entry(&apps, &path_to_id, path, &extra_dirs_owned);
+                                }
+                            }
+                            // Catch-all for other modify events - check existence to determine action
+                            EventKind::Modify(_) => {
+                                for path in desktop_paths {
+                                    if path.exists() {
+                                        debug!("Desktop file modified (generic): {:?}", path);
+                                        Self::update_entry(
+                                            &apps,
+                                            &path_to_id,
+                                            path,
+                                            &extra_dirs_owned,
+                                        );
+                                    } else {
+                                        debug!("Desktop file no longer exists: {:?}", path);
+                                        Self::remove_entry(
+                                            &apps,
+                                            &path_to_id,
+                                            path,
+                                            &extra_dirs_owned,
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Access, Other events - ignore
+                            }
                         }
                     }
+                    Err(e) => {
+                        error!("File watcher error: {:?}", e);
+                    }
                 }
-                Err(e) => {
-                    error!("File watcher error: {:?}", e);
-                }
-            }
-        });
+            });
 
         match watcher_result {
             Ok(mut watcher) => {
@@ -772,7 +849,10 @@ impl ApplicationsProvider {
                 Some(watcher)
             }
             Err(e) => {
-                error!("Failed to create file watcher: {}. Application index will not auto-update.", e);
+                error!(
+                    "Failed to create file watcher: {}. Application index will not auto-update.",
+                    e
+                );
                 None
             }
         }
@@ -780,6 +860,13 @@ impl ApplicationsProvider {
 
     /// Load all desktop entries from XDG directories into the provided cache
     /// Processes directories in XDG precedence order so higher-priority entries override lower ones
+    ///
+    /// This runs in two phases so applications become searchable as fast as
+    /// possible:
+    /// 1. Parse all `.desktop` files (cheap) and publish them - apps are now
+    ///    searchable, just without resolved icon paths.
+    /// 2. Resolve icon paths (filesystem-heavy) in the background and patch them
+    ///    into the cache.
     fn load_applications_into(
         apps: &Arc<RwLock<HashMap<String, AppEntry>>>,
         path_to_id: &Arc<RwLock<HashMap<PathBuf, String>>>,
@@ -799,7 +886,7 @@ impl ApplicationsProvider {
             debug!("  Priority {}: {:?}", priority, dir);
         }
 
-        // Process directories in order - first directory wins for each ID
+        // Phase 1: parse metadata (no icon resolution) - first directory wins for each ID
         for dir in &ordered_dirs {
             if let Ok(read_dir) = std::fs::read_dir(dir) {
                 for entry in read_dir.flatten() {
@@ -827,16 +914,47 @@ impl ApplicationsProvider {
             }
         }
 
-        info!(
-            "Loaded {} unique applications (from {} total desktop files)",
-            entries.len(),
-            path_map.len()
-        );
+        let app_count = entries.len();
 
+        // Publish metadata immediately - applications are now searchable.
         if let (Ok(mut apps_guard), Ok(mut path_guard)) = (apps.write(), path_to_id.write()) {
             *apps_guard = entries;
             *path_guard = path_map;
         }
+
+        info!(
+            "Loaded {} unique applications - resolving icons in background",
+            app_count
+        );
+
+        // Phase 2: resolve icon paths. Snapshot (id, icon) first so the lock is
+        // not held during the filesystem lookups, then patch each entry in.
+        let to_resolve: Vec<(String, String)> = match apps.read() {
+            Ok(guard) => guard
+                .values()
+                .map(|a| (a.id.clone(), a.icon.clone()))
+                .collect(),
+            Err(_) => return,
+        };
+
+        for (id, icon) in to_resolve {
+            let resolved = Self::resolve_icon_path(&icon);
+            // Skip the write lock entirely if there is nothing to store.
+            if resolved.is_none() {
+                continue;
+            }
+            if let Ok(mut guard) = apps.write() {
+                // The entry may have been replaced/removed by the watcher in the
+                // meantime; only patch it if it still matches.
+                if let Some(app) = guard.get_mut(&id) {
+                    if app.icon == icon && app.icon_path.is_none() {
+                        app.icon_path = resolved;
+                    }
+                }
+            }
+        }
+
+        info!("Finished resolving icons for {} applications", app_count);
     }
 
     /// Calculate a search score for an app against a query
@@ -844,32 +962,47 @@ impl ApplicationsProvider {
         let query_lower = query.to_lowercase();
 
         // Try matching against name first (highest priority)
-        if let Some(score) = self.matcher.fuzzy_match(&app.name.to_lowercase(), &query_lower) {
+        if let Some(score) = self
+            .matcher
+            .fuzzy_match(&app.name.to_lowercase(), &query_lower)
+        {
             return Some(score + 1000); // Boost name matches
         }
 
         // Try desktop entry ID (e.g., "org.mozilla.firefox" for flatpak apps)
-        if let Some(score) = self.matcher.fuzzy_match(&app.id.to_lowercase(), &query_lower) {
+        if let Some(score) = self
+            .matcher
+            .fuzzy_match(&app.id.to_lowercase(), &query_lower)
+        {
             return Some(score + 750);
         }
 
         // Try generic name
         if let Some(ref generic) = app.generic_name {
-            if let Some(score) = self.matcher.fuzzy_match(&generic.to_lowercase(), &query_lower) {
+            if let Some(score) = self
+                .matcher
+                .fuzzy_match(&generic.to_lowercase(), &query_lower)
+            {
                 return Some(score + 500);
             }
         }
 
         // Try keywords
         for keyword in &app.keywords {
-            if let Some(score) = self.matcher.fuzzy_match(&keyword.to_lowercase(), &query_lower) {
+            if let Some(score) = self
+                .matcher
+                .fuzzy_match(&keyword.to_lowercase(), &query_lower)
+            {
                 return Some(score + 250);
             }
         }
 
         // Try comment/description
         if let Some(ref comment) = app.comment {
-            if let Some(score) = self.matcher.fuzzy_match(&comment.to_lowercase(), &query_lower) {
+            if let Some(score) = self
+                .matcher
+                .fuzzy_match(&comment.to_lowercase(), &query_lower)
+            {
                 return Some(score);
             }
         }
@@ -963,7 +1096,11 @@ impl Provider for ApplicationsProvider {
         "Search installed applications"
     }
 
-    fn query(&self, query: &str, max_results: usize) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>> {
+    fn query(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>> {
         let result = self.query_impl(query, max_results);
         Box::pin(async move { result })
     }

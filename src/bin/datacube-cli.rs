@@ -6,7 +6,9 @@
 //!   datacube-cli providers
 
 use clap::{Parser, Subcommand};
-use datacube::proto::{Item, ListProvidersRequest, ListProvidersResponse, QueryRequest, QueryResponse};
+use datacube::proto::{
+    Item, ListProvidersRequest, ListProvidersResponse, QueryRequest, QueryResponse,
+};
 use prost::Message;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -68,7 +70,11 @@ fn get_socket_path(arg: Option<PathBuf>) -> PathBuf {
     })
 }
 
-fn send_message(stream: &mut UnixStream, msg_type: MessageType, body: &[u8]) -> std::io::Result<()> {
+fn send_message(
+    stream: &mut UnixStream,
+    msg_type: MessageType,
+    body: &[u8],
+) -> std::io::Result<()> {
     let mut header = vec![msg_type as u8];
     header.extend_from_slice(&(body.len() as u32).to_be_bytes());
     stream.write_all(&header)?;

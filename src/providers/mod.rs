@@ -154,7 +154,11 @@ pub trait Provider: Send + Sync {
     }
 
     /// Query the provider for matching items
-    fn query(&self, query: &str, max_results: usize) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>>;
+    fn query(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + '_>>;
 
     /// Get provider info
     fn info(&self) -> ProviderInfo {

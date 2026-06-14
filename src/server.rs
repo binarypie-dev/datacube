@@ -116,12 +116,8 @@ async fn handle_connection(
 
         // Process message based on type
         let response = match MessageType::try_from(msg_type) {
-            Ok(MessageType::Query) => {
-                handle_query(&body, &manager, max_results).await
-            }
-            Ok(MessageType::ListProviders) => {
-                handle_list_providers(&body, &manager).await
-            }
+            Ok(MessageType::Query) => handle_query(&body, &manager, max_results).await,
+            Ok(MessageType::ListProviders) => handle_list_providers(&body, &manager).await,
             Ok(other) => {
                 warn!("Unexpected message type: {:?}", other);
                 continue;
@@ -157,7 +153,10 @@ async fn handle_query(
         }
     };
 
-    debug!("Query: '{}' (providers: {:?})", request.query, request.providers);
+    debug!(
+        "Query: '{}' (providers: {:?})",
+        request.query, request.providers
+    );
 
     let max_results = if request.max_results > 0 {
         request.max_results as usize
