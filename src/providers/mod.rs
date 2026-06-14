@@ -170,3 +170,73 @@ pub trait Provider: Send + Sync {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_builder_sets_fields() {
+        let item = Item::new("Firefox", "applications")
+            .with_subtext("Web Browser")
+            .with_icon("firefox")
+            .with_icon_path("/usr/share/icons/firefox.png")
+            .with_score(0.75)
+            .with_metadata("desktop_id", "firefox")
+            .with_source("native");
+
+        assert_eq!(item.text, "Firefox");
+        assert_eq!(item.provider, "applications");
+        assert_eq!(item.subtext, "Web Browser");
+        assert_eq!(item.icon, "firefox");
+        assert_eq!(item.icon_path, "/usr/share/icons/firefox.png");
+        assert_eq!(item.score, 0.75);
+        assert_eq!(
+            item.metadata.get("desktop_id").map(String::as_str),
+            Some("firefox")
+        );
+        assert_eq!(item.source, "native");
+        assert!(!item.id.is_empty(), "id should be auto-generated");
+    }
+
+    #[test]
+    fn item_converts_to_proto() {
+        let item = Item::new("Calc", "calculator")
+            .with_subtext("2+2 =")
+            .with_score(1.0)
+            .with_metadata("result", "4");
+
+        let proto: crate::proto::Item = item.clone().into();
+        assert_eq!(proto.text, item.text);
+        assert_eq!(proto.provider, item.provider);
+        assert_eq!(proto.subtext, item.subtext);
+        assert_eq!(proto.score, item.score);
+        assert_eq!(proto.metadata.get("result").map(String::as_str), Some("4"));
+    }
+
+    #[test]
+    fn provider_info_converts_to_proto() {
+        let info = ProviderInfo {
+            name: "calculator".to_string(),
+            description: "Evaluate expressions".to_string(),
+            prefix: Some("=".to_string()),
+            enabled: true,
+        };
+        let proto: crate::proto::ProviderInfo = info.into();
+        assert_eq!(proto.name, "calculator");
+        assert_eq!(proto.prefix, "=");
+        assert!(proto.enabled);
+    }
+
+    #[test]
+    fn provider_info_none_prefix_becomes_empty() {
+        let info = ProviderInfo {
+            name: "applications".to_string(),
+            description: "Apps".to_string(),
+            prefix: None,
+            enabled: true,
+        };
+        let proto: crate::proto::ProviderInfo = info.into();
+        assert_eq!(proto.prefix, "");
+    }
+}

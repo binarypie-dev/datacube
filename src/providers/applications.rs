@@ -1105,3 +1105,208 @@ impl Provider for ApplicationsProvider {
         Box::pin(async move { result })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A self-cleaning temporary directory (avoids pulling in a dev-dependency).
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("datacube-test-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let p = self.path.join(name);
+            fs::write(&p, contents).unwrap();
+            p
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn make_entry(id: &str, name: &str) -> AppEntry {
+        AppEntry {
+            id: id.to_string(),
+            path: PathBuf::from(format!("/usr/share/applications/{id}.desktop")),
+            name: name.to_string(),
+            generic_name: None,
+            comment: None,
+            icon: "app-icon".to_string(),
+            icon_path: None,
+            keywords: Vec::new(),
+            terminal: false,
+            launch_count: 0,
+            source: AppSource::Native,
+        }
+    }
+
+    /// Build a provider directly from a set of entries, bypassing the
+    /// filesystem scan and background loader.
+    fn provider_with(entries: Vec<AppEntry>) -> ApplicationsProvider {
+        let map: HashMap<String, AppEntry> =
+            entries.into_iter().map(|e| (e.id.clone(), e)).collect();
+        ApplicationsProvider {
+            apps: Arc::new(RwLock::new(map)),
+            path_to_id: Arc::new(RwLock::new(HashMap::new())),
+            matcher: SkimMatcherV2::default(),
+            extra_dirs: Vec::new(),
+            watcher: None,
+        }
+    }
+
+    #[test]
+    fn app_source_from_path() {
+        assert_eq!(
+            AppSource::from_path(Path::new(
+                "/var/lib/flatpak/exports/share/applications/org.x.desktop"
+            )),
+            AppSource::Flatpak
+        );
+        assert_eq!(
+            AppSource::from_path(Path::new("/var/lib/snapd/desktop/applications/foo.desktop")),
+            AppSource::Snap
+        );
+        assert_eq!(
+            AppSource::from_path(Path::new("/usr/share/applications/foo.desktop")),
+            AppSource::Native
+        );
+    }
+
+    #[test]
+    fn app_source_as_str() {
+        assert_eq!(AppSource::Native.as_str(), "native");
+        assert_eq!(AppSource::Flatpak.as_str(), "flatpak");
+        assert_eq!(AppSource::Snap.as_str(), "snap");
+    }
+
+    #[test]
+    fn detects_desktop_files() {
+        assert!(ApplicationsProvider::is_desktop_file(Path::new(
+            "/a/b/foo.desktop"
+        )));
+        assert!(!ApplicationsProvider::is_desktop_file(Path::new(
+            "/a/b/foo.txt"
+        )));
+        assert!(!ApplicationsProvider::is_desktop_file(Path::new(
+            "/a/b/foo"
+        )));
+    }
+
+    #[test]
+    fn parse_desktop_file_basic() {
+        let dir = TempDir::new();
+        let path = dir.write(
+            "firefox.desktop",
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Firefox\n\
+             GenericName=Web Browser\n\
+             Comment=Browse the web\n\
+             Exec=/usr/bin/firefox\n\
+             Icon=firefox\n\
+             Keywords=internet;browser;\n\
+             Terminal=false\n",
+        );
+
+        let entry = ApplicationsProvider::parse_desktop_file(&path).expect("should parse");
+        assert_eq!(entry.id, "firefox");
+        assert_eq!(entry.name, "Firefox");
+        assert_eq!(entry.generic_name.as_deref(), Some("Web Browser"));
+        assert_eq!(entry.comment.as_deref(), Some("Browse the web"));
+        assert_eq!(entry.icon, "firefox");
+        assert!(entry.keywords.iter().any(|k| k == "browser"));
+        assert!(!entry.terminal);
+        // Icon resolution is deferred - parse leaves it unset.
+        assert!(entry.icon_path.is_none());
+    }
+
+    #[test]
+    fn parse_desktop_file_skips_nodisplay_and_no_exec() {
+        let dir = TempDir::new();
+
+        let hidden = dir.write(
+            "hidden.desktop",
+            "[Desktop Entry]\nType=Application\nName=Hidden\nExec=/bin/true\nNoDisplay=true\n",
+        );
+        assert!(ApplicationsProvider::parse_desktop_file(&hidden).is_none());
+
+        let no_exec = dir.write(
+            "noexec.desktop",
+            "[Desktop Entry]\nType=Application\nName=NoExec\n",
+        );
+        assert!(ApplicationsProvider::parse_desktop_file(&no_exec).is_none());
+    }
+
+    #[test]
+    fn load_applications_into_reads_extra_dir() {
+        let dir = TempDir::new();
+        let unique = "datacube-unit-test-app-xyz";
+        dir.write(
+            &format!("{unique}.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Datacube Unit Test App\nExec=/bin/true\nIcon=x\n",
+        );
+
+        let apps = Arc::new(RwLock::new(HashMap::new()));
+        let path_to_id = Arc::new(RwLock::new(HashMap::new()));
+        ApplicationsProvider::load_applications_into(&apps, &path_to_id, &[dir.path.clone()]);
+
+        let guard = apps.read().unwrap();
+        let entry = guard.get(unique).expect("temp app should be loaded");
+        assert_eq!(entry.name, "Datacube Unit Test App");
+    }
+
+    #[test]
+    fn query_matches_by_name() {
+        let provider = provider_with(vec![
+            make_entry("firefox", "Firefox"),
+            make_entry("gimp", "GIMP"),
+            make_entry("code", "Visual Studio Code"),
+        ]);
+
+        let results = provider.query_impl("firefox", 10);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].text, "Firefox");
+        assert_eq!(results[0].provider, "applications");
+    }
+
+    #[test]
+    fn query_matches_by_id() {
+        let mut entry = make_entry("org.mozilla.firefox", "Firefox");
+        entry.source = AppSource::Flatpak;
+        let provider = provider_with(vec![entry, make_entry("gimp", "GIMP")]);
+
+        let results = provider.query_impl("mozilla", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "Firefox");
+    }
+
+    #[test]
+    fn query_no_match_is_empty() {
+        let provider = provider_with(vec![make_entry("firefox", "Firefox")]);
+        assert!(provider.query_impl("zzzzzznotanapp", 10).is_empty());
+    }
+
+    #[test]
+    fn query_empty_returns_all_up_to_max() {
+        let provider = provider_with(vec![
+            make_entry("a", "Alpha"),
+            make_entry("b", "Beta"),
+            make_entry("c", "Gamma"),
+        ]);
+
+        assert_eq!(provider.query_impl("", 10).len(), 3);
+        assert_eq!(provider.query_impl("", 2).len(), 2);
+    }
+}
